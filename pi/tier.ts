@@ -21,11 +21,11 @@ export type CostTier = (typeof COST_TIERS)[number];
 
 /** Average-generation-cost percentile band each named tier selects. */
 export const COST_TIER_BANDS: Record<CostTier, string> = {
-	low: "0-20%",
-	medium: "20-40%",
-	high: "40-60%",
-	xhigh: "60-80%",
-	max: "80-100%",
+  low: "0-20%",
+  medium: "20-40%",
+  high: "40-60%",
+  xhigh: "60-80%",
+  max: "80-100%",
 };
 
 const ROUTER_PLUGIN_IDS = ["auto-router", "auto-beta-router"] as const;
@@ -34,15 +34,15 @@ const ROUTER_PLUGIN_IDS = ["auto-router", "auto-beta-router"] as const;
  * optional routing suffix), "auto-beta-router" for openrouter/auto-beta,
  * undefined for anything else. */
 export function routerPluginId(model: string): (typeof ROUTER_PLUGIN_IDS)[number] | undefined {
-	if (/^openrouter\/auto-beta(:[a-z0-9._-]+)?$/i.test(model)) return "auto-beta-router";
-	if (/^openrouter\/auto(:[a-z0-9._-]+)?$/i.test(model)) return "auto-router";
-	return undefined;
+  if (/^openrouter\/auto-beta(:[a-z0-9._-]+)?$/i.test(model)) return "auto-beta-router";
+  if (/^openrouter\/auto(:[a-z0-9._-]+)?$/i.test(model)) return "auto-router";
+  return undefined;
 }
 
 export type ParsedTierArg =
-	| { kind: "tier"; tier: CostTier }
-	| { kind: "clear" }
-	| { kind: "invalid"; input: string };
+  | { kind: "tier"; tier: CostTier }
+  | { kind: "clear" }
+  | { kind: "invalid"; input: string };
 
 /**
  * Parse a /openrouter-tier argument. Undefined/empty means "no argument" —
@@ -50,12 +50,12 @@ export type ParsedTierArg =
  * aliases clear back to the workspace default.
  */
 export function parseTierArg(arg: string | undefined): ParsedTierArg | undefined {
-	if (arg === undefined || arg === "") return undefined;
-	if ((COST_TIERS as readonly string[]).includes(arg)) {
-		return { kind: "tier", tier: arg as CostTier };
-	}
-	if (["off", "default", "reset", "clear"].includes(arg)) return { kind: "clear" };
-	return { kind: "invalid", input: arg };
+  if (arg === undefined || arg === "") return undefined;
+  if ((COST_TIERS as readonly string[]).includes(arg)) {
+    return { kind: "tier", tier: arg as CostTier };
+  }
+  if (["off", "default", "reset", "clear"].includes(arg)) return { kind: "clear" };
+  return { kind: "invalid", input: arg };
 }
 
 /**
@@ -64,16 +64,44 @@ export function parseTierArg(arg: string | undefined): ParsedTierArg | undefined
  * marked. Pure so the labels stay testable.
  */
 export function tierPickerOptions(current: CostTier | null): Array<{ label: string; tier: CostTier | null }> {
-	const entries: Array<{ label: string; tier: CostTier | null }> = [
-		{ label: "default — workspace setting", tier: null },
-		...COST_TIERS.map((tier) => ({
-			label: `${tier} — cost band ${COST_TIER_BANDS[tier]}`,
-			tier: tier as CostTier,
-		})),
-	];
-	return entries.map((entry) =>
-		entry.tier === current ? { ...entry, label: `${entry.label} (current)` } : entry,
-	);
+  const entries: Array<{ label: string; tier: CostTier | null }> = [
+    { label: "default — workspace setting", tier: null },
+    ...COST_TIERS.map((tier) => ({
+      label: `${tier} — cost band ${COST_TIER_BANDS[tier]}`,
+      tier: tier as CostTier,
+    })),
+  ];
+  return entries.map((entry) =>
+    entry.tier === current ? { ...entry, label: `${entry.label} (current)` } : entry,
+  );
+}
+
+/**
+ * Resolve the active session id from a pi context. Both the command and
+ * session_start call this, so the hook's key and the command's key can
+ * never drift apart (the hook's own event carries no context).
+ */
+export function resolveSessionId(ctx: unknown): string | undefined {
+  const sm = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | null | undefined)
+    ?.sessionManager;
+  const id = sm?.getSessionId?.();
+  return typeof id === "string" && id ? id : undefined;
+}
+
+/**
+ * Attach the session's tier to the hook's merged result. Returns the result
+ * unchanged when no tier is selected (preserving the hook's undefined =
+ * "no change" contract); when a tier is set and the hook produced no
+ * result, the tier is applied to the untouched payload instead.
+ */
+export function withSessionTier(
+  result: unknown,
+  payload: unknown,
+  model: string,
+  tier: CostTier | null,
+): unknown {
+  if (tier === null) return result;
+  return applyCostTier(result ?? payload, model, tier);
 }
 
 /**
@@ -84,22 +112,22 @@ export function tierPickerOptions(current: CostTier | null): Array<{ label: stri
  * plugins (e.g. from requests.defaults) untouched.
  */
 export function applyCostTier(
-	payload: unknown,
-	model: string,
-	tier: CostTier | null,
+  payload: unknown,
+  model: string,
+  tier: CostTier | null,
 ): unknown {
-	if (tier === null) return payload;
-	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
-	const pluginId = routerPluginId(model);
-	if (!pluginId) return payload;
+  if (tier === null) return payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const pluginId = routerPluginId(model);
+  if (!pluginId) return payload;
 
-	const record = payload as Record<string, unknown>;
-	const entry = { id: pluginId, cost_tier: tier };
-	const existing = Array.isArray(record.plugins) ? [...record.plugins] : [];
-	const index = existing.findIndex(
-		(p) => p && typeof p === "object" && !Array.isArray(p) && (p as any).id === pluginId,
-	);
-	if (index >= 0) existing[index] = entry;
-	else existing.push(entry);
-	return { ...record, plugins: existing };
+  const record = payload as Record<string, unknown>;
+  const entry = { id: pluginId, cost_tier: tier };
+  const existing = Array.isArray(record.plugins) ? [...record.plugins] : [];
+  const index = existing.findIndex(
+    (p) => p && typeof p === "object" && !Array.isArray(p) && (p as any).id === pluginId,
+  );
+  if (index >= 0) existing[index] = entry;
+  else existing.push(entry);
+  return { ...record, plugins: existing };
 }

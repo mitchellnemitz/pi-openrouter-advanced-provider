@@ -21,12 +21,13 @@ import {
 import { scoreProviders } from "./scoring.js";
 import { loadRequestConfig, mergeRequestConfig, isVariantModelId } from "./config.js";
 import {
-	applyCostTier,
-	COST_TIERS,
-	COST_TIER_BANDS,
-	parseTierArg,
-	tierPickerOptions,
-	type CostTier,
+  COST_TIERS,
+  COST_TIER_BANDS,
+  parseTierArg,
+  resolveSessionId,
+  tierPickerOptions,
+  withSessionTier,
+  type CostTier,
 } from "./tier.js";
 import {
   getSnapshot,
@@ -169,8 +170,15 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
   // /openrouter-tier selects a cost_tier for this session's auto-router
   // requests; the absence of an entry means "workspace default" — no plugins
-  // entry is added and OpenRouter's saved routing settings apply. reset on
+  // entry is added and OpenRouter's saved routing settings apply. Reset on
   // session_start (mirrors /thinking's session scope).
+  //
+  // The request hook's event carries no context, so the session id is
+  // tracked here: session_start and the command both record it via
+  // resolveSessionId, and the hook reads the same variable — the two keys
+  // cannot drift apart. One process serves one active pi session at a
+  // time; a newly started session re-points the id (its tier starts
+  // empty).
   const tierBySession = new Map<string, CostTier>();
   let activeSessionId: string | undefined;
 
@@ -254,8 +262,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     }
 
     const tier = activeSessionId !== undefined ? (tierBySession.get(activeSessionId) ?? null) : null;
-    if (tier) return applyCostTier(result ?? payload, model, tier);
-    return result;
+    return withSessionTier(result, payload, model, tier);
   });
 
   // ---------- Provider registration (standalone catalog) ----------
@@ -359,7 +366,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // ---------- Pre-warm hooks ----------
 
   pi.on("session_start", async (_event, ctx) => {
-    activeSessionId = (ctx as any)?.sessionManager?.getSessionId?.() ?? activeSessionId;
+    activeSessionId = resolveSessionId(ctx) ?? activeSessionId;
     try {
       await syncPlain(ctx, true, true);
       updateStatusBar(ctx);
@@ -467,9 +474,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       lines.push(`Models registered: ${snapshot.models.length}`);
       lines.push(`Config overrides: ${requestConfig.models?.size ?? 0}`);
-      const tier = ((ctx as any)?.sessionManager?.getSessionId?.() !== undefined)
-        ? tierBySession.get((ctx as any).sessionManager.getSessionId()) ?? null
-        : null;
+      const tier = tierBySession.get(resolveSessionId(ctx) ?? "") ?? null;
       lines.push(`Cost tier: ${tier ? `${tier} (cost band ${COST_TIER_BANDS[tier]})` : "workspace default"}`);
 
       if (snapshot.timestamp > 0) {
@@ -517,7 +522,14 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   pi.registerCommand("openrouter-tier", {
     description: "Set the OpenRouter auto-router cost tier for this session (default clears back to the workspace setting)",
     handler: async (args, ctx) => {
-      const sessionId = (ctx as any)?.sessionManager?.getSessionId?.() ?? "default";
+      const sessionId = resolveSessionId(ctx);
+      if (!sessionId) {
+        // Without a session id nothing would read the stored tier — say so
+        // instead of storing under a key the request hook never looks up.
+        ctx.ui.notify("OpenRouter: no active session; cost tier not set", "warning");
+        return;
+      }
+      activeSessionId = sessionId;
       const current = tierBySession.get(sessionId) ?? null;
       const describe = (tier: CostTier | null) =>
         tier ? `${tier} (cost band ${COST_TIER_BANDS[tier]})` : "workspace default";
