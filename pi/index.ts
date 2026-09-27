@@ -21,6 +21,15 @@ import {
 import { scoreProviders } from "./scoring.js";
 import { loadRequestConfig, mergeRequestConfig, isVariantModelId } from "./config.js";
 import {
+  COST_TIERS,
+  COST_TIER_BANDS,
+  parseTierArg,
+  resolveSessionId,
+  tierPickerOptions,
+  withSessionTier,
+  type CostTier,
+} from "./tier.js";
+import {
   getSnapshot,
   nextGeneration,
   isStale,
@@ -157,6 +166,22 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     }
   }
 
+  // ---------- Session cost tier (auto-router) ----------
+
+  // /openrouter-tier selects a cost_tier for this session's auto-router
+  // requests; the absence of an entry means "workspace default" — no plugins
+  // entry is added and OpenRouter's saved routing settings apply. Reset on
+  // session_start (mirrors /thinking's session scope).
+  //
+  // The request hook's event carries no context, so the session id is
+  // tracked here: session_start and the command both record it via
+  // resolveSessionId, and the hook reads the same variable — the two keys
+  // cannot drift apart. One process serves one active pi session at a
+  // time; a newly started session re-points the id (its tier starts
+  // empty).
+  const tierBySession = new Map<string, CostTier>();
+  let activeSessionId: string | undefined;
+
   // ---------- Per-request routing ----------
 
   // Routing sources, layered in order:
@@ -194,37 +219,50 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     // Defaults (requests.defaults) apply to every request; the per-model
     // entry and the JIT pick then layer on top — their provider objects
     // merge over the defaults', so e.g. defaults' data_collection survives
-    // alongside a selection's order.
+    // alongside a selection's order. The session cost tier is applied last,
+    // so an explicit /openrouter-tier selection replaces any auto-router
+    // plugin entry the static config layers put on the payload.
     let base: Record<string, unknown> = payload as Record<string, unknown>;
     if (requestConfig.defaults) {
       base = mergeRequestConfig(payload, requestConfig.defaults) as Record<string, unknown>;
     }
 
+    let result: Record<string, unknown> | undefined;
     const override = requestConfig.models?.get(model);
-    if (override) return mergeRequestConfig(base, override);
+    if (override) {
+      result = mergeRequestConfig(base, override) as Record<string, unknown>;
+    } else {
+      const selection = getSelection(model) ?? getStaleSelection(model);
+      const pick = selection?.result.pick;
+      if (pick) {
+        const ignore = selection.result.ignore;
+        const provider: Record<string, unknown> = {
+          order: [pick],
+          allow_fallbacks: true,
+        };
+        // No provider.quantizations pin: it is a request-wide filter, and when
+        // no endpoint matches it the request hard-fails ("No endpoints found
+        // for the request with quantization: ...") even with allow_fallbacks —
+        // a stale score would break every request. A fallback serving a
+        // different quantization than the scored row is a soft mismatch; the
+        // registered context window may overestimate until the next selection
+        // refresh. Merge the computed stunted-provider list with any ignore
+        // list the defaults or a prior layer already set, instead of replacing
+        // it.
+        const baseIgnore = Array.isArray((base.provider as Record<string, unknown> | undefined)?.ignore)
+          ? ((base.provider as Record<string, unknown>).ignore as unknown[])
+          : [];
+        const mergedIgnore = [...new Set([...baseIgnore, ...ignore])];
+        if (mergedIgnore.length > 0) provider.ignore = mergedIgnore;
+        result = { ...base, provider: { ...(base.provider as Record<string, unknown> ?? {}), ...provider } };
+      } else {
+        // No selection: leave the payload as the config layers left it.
+        result = base === payload ? undefined : base;
+      }
+    }
 
-    const selection = getSelection(model) ?? getStaleSelection(model);
-    const pick = selection?.result.pick;
-    if (!pick) return base === payload ? undefined : base;
-    const ignore = selection.result.ignore;
-    const provider: Record<string, unknown> = {
-      order: [pick],
-      allow_fallbacks: true,
-    };
-    // No provider.quantizations pin: it is a request-wide filter, and when no
-    // endpoint matches it the request hard-fails ("No endpoints found for the
-    // request with quantization: ...") even with allow_fallbacks — a stale
-    // score would break every request. A fallback serving a different
-    // quantization than the scored row is a soft mismatch; the registered
-    // context window may overestimate until the next selection refresh.
-    // Merge the computed stunted-provider list with any ignore list the
-    // defaults or a prior layer already set, instead of replacing it.
-    const baseIgnore = Array.isArray((base.provider as Record<string, unknown> | undefined)?.ignore)
-      ? ((base.provider as Record<string, unknown>).ignore as unknown[])
-      : [];
-    const mergedIgnore = [...new Set([...baseIgnore, ...ignore])];
-    if (mergedIgnore.length > 0) provider.ignore = mergedIgnore;
-    return { ...base, provider: { ...(base.provider as Record<string, unknown> ?? {}), ...provider } };
+    const tier = activeSessionId !== undefined ? (tierBySession.get(activeSessionId) ?? null) : null;
+    return withSessionTier(result, payload, model, tier);
   });
 
   // ---------- Provider registration (standalone catalog) ----------
@@ -328,6 +366,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // ---------- Pre-warm hooks ----------
 
   pi.on("session_start", async (_event, ctx) => {
+    activeSessionId = resolveSessionId(ctx) ?? activeSessionId;
     try {
       await syncPlain(ctx, true, true);
       updateStatusBar(ctx);
@@ -435,6 +474,8 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       lines.push(`Models registered: ${snapshot.models.length}`);
       lines.push(`Config overrides: ${requestConfig.models?.size ?? 0}`);
+      const tier = tierBySession.get(resolveSessionId(ctx) ?? "") ?? null;
+      lines.push(`Cost tier: ${tier ? `${tier} (cost band ${COST_TIER_BANDS[tier]})` : "workspace default"}`);
 
       if (snapshot.timestamp > 0) {
         const ageMin = Math.round((Date.now() - snapshot.timestamp) / 60000);
@@ -475,6 +516,58 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
       }
 
       emitMessage(pi, lines.join("\n"));
+    },
+  });
+
+  pi.registerCommand("openrouter-tier", {
+    description: "Set the OpenRouter auto-router cost tier for this session (default clears back to the workspace setting)",
+    handler: async (args, ctx) => {
+      const sessionId = resolveSessionId(ctx);
+      if (!sessionId) {
+        // Without a session id nothing would read the stored tier — say so
+        // instead of storing under a key the request hook never looks up.
+        ctx.ui.notify("OpenRouter: no active session; cost tier not set", "warning");
+        return;
+      }
+      activeSessionId = sessionId;
+      const current = tierBySession.get(sessionId) ?? null;
+      const describe = (tier: CostTier | null) =>
+        tier ? `${tier} (cost band ${COST_TIER_BANDS[tier]})` : "workspace default";
+
+      const parsed = parseTierArg(args);
+      if (parsed === undefined) {
+        // Interactive picker. Not available in every UI mode; fall back to
+        // printing the CLI form.
+        try {
+          const options = tierPickerOptions(current);
+          const choice = await ctx.ui.select(
+            `OpenRouter cost tier (current: ${describe(current)})`,
+            options.map((o) => o.label),
+          );
+          if (choice === undefined) return; // cancelled
+          const picked = options[options.map((o) => o.label).indexOf(choice)];
+          if (picked) {
+            if (picked.tier === null) tierBySession.delete(sessionId);
+            else tierBySession.set(sessionId, picked.tier);
+            ctx.ui.notify(`OpenRouter cost tier: ${describe(picked.tier)}`, "info");
+          }
+        } catch {
+          ctx.ui.notify("Usage: /openrouter-tier [low|medium|high|xhigh|max|off]", "info");
+        }
+        return;
+      }
+
+      if (parsed.kind === "invalid") {
+        ctx.ui.notify(
+          `OpenRouter: unknown tier "${parsed.input}" — usage: /openrouter-tier [low|medium|high|xhigh|max|off]`,
+          "warning",
+        );
+        return;
+      }
+
+      if (parsed.kind === "clear") tierBySession.delete(sessionId);
+      else tierBySession.set(sessionId, parsed.tier);
+      ctx.ui.notify(`OpenRouter cost tier: ${describe(parsed.kind === "clear" ? null : parsed.tier)}`, "info");
     },
   });
 
