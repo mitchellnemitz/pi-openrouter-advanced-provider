@@ -134,6 +134,31 @@ OpenRouter model id bypasses the algorithm entirely:
   `~`-prefixed aliases, and `:batch` ids are skipped with a warning. (`:free`
   is a price indicator, not a tier — those stay registered.)
 
+## Cost tier
+
+The auto routers (`openrouter/auto`, `openrouter/auto-beta`) accept a named
+`cost_tier` that selects a cost-percentile band of average generation cost
+for the classified task: `low` [0, 20), `medium` [20, 40), `high` [40, 60),
+`xhigh` [60, 80), `max` [80, 100]. `/openrouter-tier` sets that tier for the
+current session; run it with no arguments in an interactive session to pick
+from a visual list, or pass an argument directly:
+
+```
+/openrouter-tier max    # top band, quality-first
+/openrouter-tier low    # cheapest band
+/openrouter-tier off    # clear back to the workspace default
+```
+
+The selection is session-scoped like pi's `/thinking`: it resets when the
+session restarts and never changes stored settings. The default state sends
+nothing, so OpenRouter's workspace routing settings (including its saved
+cost tier and "prevent overrides") apply untouched. On concrete models the
+tier is inert — it is only attached when the request targets a router slug,
+with the plugin id (`auto-router` / `auto-beta-router`) matched to that slug.
+An explicit selection replaces any auto-router plugin entry from the
+[configuration](#configuration) layers; unrelated plugin entries are
+preserved.
+
 ## Install
 
 ```
@@ -147,6 +172,7 @@ Then reload pi.
 - `/openrouter-sync` — refresh the catalog and re-run provider selection.
 - `/openrouter-balance` — show your OpenRouter credit balance and usage.
 - `/openrouter-status` — show sync state and current selections.
+- `/openrouter-tier` — set the session's auto-router cost tier (interactive picker, or `low|medium|high|xhigh|max|off`).
 
 ## Development
 
