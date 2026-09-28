@@ -151,7 +151,30 @@ export interface RequestConfig {
 
 export interface LoadedRequestConfig {
   config: RequestConfig;
+  selection: SelectionTuning;
   warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Provider-selection tuning (user config file)
+// ---------------------------------------------------------------------------
+
+/** Relative axis weights; only ratios matter, zero disables the axis. */
+export interface SelectionWeights {
+  throughput: number;
+  latency: number;
+  toolCall: number;
+  price: number;
+}
+
+/** Tuning for the just-in-time provider selection algorithm. */
+export interface SelectionTuning {
+  /** false: no client-side pick and no stats fetches — OpenRouter default routing. */
+  enabled: boolean;
+  /** Blended $/M splitting budget weights from flagship weights. */
+  priceAnchor: number;
+  budgetWeights: SelectionWeights;
+  flagshipWeights: SelectionWeights;
 }
 
 // ---------------------------------------------------------------------------

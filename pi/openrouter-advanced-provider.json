@@ -1,1 +1,10 @@
-{}
+{
+  "selection": {
+    "enabled": true,
+    "priceAnchor": 3.0,
+    "weights": {
+      "budget": { "throughput": 0.55, "latency": 0.2, "toolCall": 0.15, "price": 0.1 },
+      "flagship": { "throughput": 0.3, "latency": 0.25, "toolCall": 0.2, "price": 0.25 }
+    }
+  }
+}

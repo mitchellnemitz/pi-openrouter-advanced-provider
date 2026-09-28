@@ -20,7 +20,13 @@ import {
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
-import { loadRequestConfig, mergeRequestConfig, isVariantModelId } from "./config.js";
+import {
+  DEFAULT_SELECTION,
+  isVariantModelId,
+  loadRequestConfig,
+  mergeRequestConfig,
+} from "./config.js";
+import type { SelectionTuning } from "./types.js";
 import {
   COST_TIERS,
   COST_TIER_BANDS,
@@ -84,11 +90,13 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // file says. Re-loaded on every sync.
   let requestConfig: RequestConfig = {};
   let configWarnings: string[] = [];
+  let selectionTuning: SelectionTuning = DEFAULT_SELECTION;
 
   function refreshRequestConfig(): void {
     const loaded = loadRequestConfig();
     requestConfig = loaded.config;
     configWarnings = loaded.warnings;
+    selectionTuning = loaded.selection;
   }
 
   function notifyConfigWarnings(ctx: any) {
@@ -113,6 +121,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   const selectionInFlight = new Map<string, Promise<SelectionResult | undefined>>();
 
   async function selectProvider(modelId: string, apiKey: string | undefined, force = false): Promise<SelectionResult | undefined> {
+    if (!selectionTuning.enabled) return undefined; // OpenRouter default routing
     if (!modelId || modelId.startsWith("~") || modelId.startsWith("openrouter/")) return undefined;
     if (isVariantModelId(modelId)) return undefined;
     if (requestConfig.models?.has(modelId)) return undefined; // config override bypasses the algorithm
@@ -137,7 +146,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
         fetchEndpointStats(permaslug),
         fetchToolCallErrorRates(permaslug).catch(() => new Map<string, number>()),
       ]);
-      return scoreProviders(modelId, endpoints, toolRates);
+      return scoreProviders(modelId, endpoints, toolRates, selectionTuning);
     })()
       .then((result) => {
         if (result) setSelection(modelId, result);
@@ -252,10 +261,14 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
     let result: Record<string, unknown> | undefined;
     const override = requestConfig.models?.get(model);
+    // With selection disabled the JIT pick is skipped entirely — the config
+    // layers above still apply, and OpenRouter's default routing serves.
+    const selection = selectionTuning.enabled
+      ? (getSelection(model) ?? getStaleSelection(model))
+      : undefined;
     if (override) {
       result = mergeRequestConfig(base, override) as Record<string, unknown>;
     } else {
-      const selection = getSelection(model) ?? getStaleSelection(model);
       const pick = selection?.result.pick;
       if (pick) {
         const ignore = selection.result.ignore;
@@ -403,6 +416,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // lands here, before the first provider request.
   pi.on("before_agent_start", async (_event, ctx) => {
     try {
+      if (!selectionTuning.enabled) return; // no stats fetches when selection is off
       const model = ctx.model ?? (ctx as any).getModel?.();
       if (!model) return;
       const id = String((model as any).id ?? model);
@@ -497,6 +511,17 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       lines.push(`Models registered: ${snapshot.models.length}`);
       lines.push(`Config overrides: ${requestConfig.models?.size ?? 0}`);
+      lines.push(
+        selectionTuning.enabled
+          ? `Selection: enabled — price anchor $${selectionTuning.priceAnchor}/M blended`
+          : "Selection: disabled — OpenRouter default routing",
+      );
+      if (selectionTuning.enabled) {
+        const fmt = (w: typeof selectionTuning.budgetWeights) =>
+          `throughput ${w.throughput}, latency ${w.latency}, tool-call ${w.toolCall}, price ${w.price}`;
+        lines.push(`  Budget weights: ${fmt(selectionTuning.budgetWeights)}`);
+        lines.push(`  Flagship weights: ${fmt(selectionTuning.flagshipWeights)}`);
+      }
       const tier = tierBySession.get(resolveSessionId(ctx) ?? "") ?? null;
       lines.push(`Cost tier: ${tier ? `${tier} (cost band ${COST_TIER_BANDS[tier]})` : "workspace default"}`);
 

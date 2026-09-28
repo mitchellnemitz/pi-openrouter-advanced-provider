@@ -71,28 +71,71 @@ Scoring (weights are constants at the top of `pi/scoring.ts`):
   `context_length` of the candidate set are excluded from the pick AND added
   to the request's `ignore` list, so fallbacks cannot land on a 256K
   provider for a 1M model.
-- Adaptive axes by price anchor ($3.00/M blended price threshold):
-  - **Under $3.00/M anchor** (budget/workhorse models): price differences
+- Adaptive axes by price anchor (blended $/M, default $3.00 — tunable via
+  the [selection config](#selection-tuning)):
+  - **Under the anchor** (budget/workhorse models): price differences
     are pennies per million tokens and should not override speed.
-    Weights: Throughput 0.55 (consistency-adjusted: `p50 × √(p50/p99)`),
+    Default weights: Throughput 0.55 (consistency-adjusted: `p50 × √(p50/p99)`),
     Latency 0.20 (half inverse p50 latency, half inverse latency tail
     `p99/p50`), Tool-call quality 0.15 (soft-floor: ≤3% error rate receives
-    near-full credit), Price 0.10. Ties within 5%: higher throughput wins,
-    then lower p50 latency, then price.
-  - **At or above $3.00/M anchor** (flagships): price spreads are real
-    dollars that justify speed tradeoffs. Weights: Throughput 0.30, Latency
-    0.25, Tool-call quality 0.20, Price 0.25. Ties within 5%: cheaper price
-    wins, then lower p50 latency, then throughput.
+    near-full credit), Price 0.10.
+  - **At or above the anchor** (flagships): price spreads are real
+    dollars that justify speed tradeoffs. Default weights: Throughput 0.30,
+    Latency 0.25, Tool-call quality 0.20, Price 0.25.
 - Endpoints without samples are fallback-only; a model with no sampled
   endpoints picks price-first.
+
+Ties within 5% of the top score break in descending weight order — the
+tier's dominant axis decides first (throughput under both default weight
+sets). See [Selection tuning](#selection-tuning) for customizing all of
+it.
 
 ## Configuration
 
 One file name, two locations — the location differentiates, nothing else:
 
-- `pi/openrouter-advanced-provider.json` — shipped **empty**.
+- `pi/openrouter-advanced-provider.json` — shipped defaults for the selection
+  tuning below.
 - `~/.pi/agent/openrouter-advanced-provider.json` — user overrides, merged
-  on top. Reload via `/openrouter-sync` after editing.
+  per-field on top. Reload via `/openrouter-sync` after editing.
+
+### Selection tuning
+
+The `selection` section tunes the just-in-time provider selection
+algorithm. Every field is optional and overrides only itself; these are
+the shipped values:
+
+```json
+{
+  "selection": {
+    "enabled": true,
+    "priceAnchor": 3.0,
+    "weights": {
+      "budget":   { "throughput": 0.55, "latency": 0.2, "toolCall": 0.15, "price": 0.1 },
+      "flagship": { "throughput": 0.3, "latency": 0.25, "toolCall": 0.2, "price": 0.25 }
+    }
+  }
+}
+```
+
+- `enabled: false` turns the client-side selection off entirely — no
+  provider pinning and no stats fetches; OpenRouter's default routing
+  serves every request. The `requests` entries below keep working.
+- `priceAnchor` is the blended $/M price splitting budget-tier weights
+  from flagship-tier weights. A model whose sampled endpoints' median
+  blended price is below the anchor scores as budget, at or above it as
+  flagship.
+- `weights` replaces the per-tier axis weights. Values are ratios — only
+  relative size matters, so `2` and `0.2` behave identically. A zero
+  weight removes the axis from scoring and from tiebreaks, which is how
+  you disable a data point: `{ "throughput": 1, "latency": 0,
+  "toolCall": 0, "price": 0 }` pins strictly the highest-throughput
+  provider. Ties within 5% of the top score break in descending weight
+  order — your dominant axis decides.
+
+Invalid values are dropped with a warning (surfaced on `/openrouter-sync`
+and `/openrouter-status`); an all-zero weight set keeps the default
+weights for that tier. `/openrouter-status` shows the active tuning.
 
 The goal is to rely on the algorithm, not the file — but when you want to
 force routing for a model, an entry under `requests.models` keyed by exact

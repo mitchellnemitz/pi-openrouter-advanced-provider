@@ -2,10 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  type LoadedRequestConfig,
-  type ModelRequestConfig,
-  type RequestConfig,
+import type {
+  LoadedRequestConfig,
+  ModelRequestConfig,
+  RequestConfig,
+  SelectionTuning,
+  SelectionWeights,
 } from "./types.js";
 
 /**
@@ -104,6 +106,106 @@ export function mergeRequestConfig(payload: unknown, entry: ModelRequestConfig):
     record[key] = value;
   }
   return record;
+}
+
+// ---------------------------------------------------------------------------
+// Provider-selection tuning
+// ---------------------------------------------------------------------------
+
+/**
+ * Built-in selection tuning — the values the algorithm shipped with, kept
+ * here so a user file overrides any single field without naming the rest.
+ * The shipped `openrouter-advanced-provider.json` carries the same numbers;
+ * this constant is the base of the merge and the fallback for invalid input.
+ */
+export const DEFAULT_SELECTION: SelectionTuning = {
+  enabled: true,
+  priceAnchor: 3.0,
+  budgetWeights: { throughput: 0.55, latency: 0.2, toolCall: 0.15, price: 0.1 },
+  flagshipWeights: { throughput: 0.3, latency: 0.25, toolCall: 0.2, price: 0.25 },
+};
+
+const WEIGHT_KEYS = ["throughput", "latency", "toolCall", "price"] as const;
+
+function parseWeights(
+  tier: string,
+  raw: unknown,
+  base: SelectionWeights,
+  warnings: string[],
+): SelectionWeights {
+  if (raw === undefined) return { ...base };
+  if (!isPlainObject(raw)) {
+    warnings.push(`selection.weights.${tier} must be an object — default weights kept`);
+    return { ...base };
+  }
+  const out: SelectionWeights = { ...base };
+  let sum = 0;
+  for (const key of WEIGHT_KEYS) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      warnings.push(`selection.weights.${tier}.${key} must be a non-negative number — default kept`);
+      continue;
+    }
+    out[key] = value;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!WEIGHT_KEYS.includes(key as (typeof WEIGHT_KEYS)[number])) {
+      warnings.push(`selection.weights.${tier}.${key} is not a selection axis — dropped`);
+    }
+  }
+  for (const key of WEIGHT_KEYS) sum += out[key];
+  if (sum <= 0) {
+    warnings.push(`selection.weights.${tier} disables every axis — default weights kept`);
+    return { ...base };
+  }
+  return out;
+}
+
+/**
+ * Parse the config file's `selection` section over the built-in defaults.
+ * Per-field semantics: a provided field replaces that field only; unknown
+ * or invalid fields are dropped with a warning and never reach the wire
+ * (they cannot — selection tuning is client-side only).
+ */
+export function parseSelectionSection(raw: unknown, warnings: string[]): SelectionTuning {
+  if (raw === undefined) return structuredClone(DEFAULT_SELECTION);
+  if (!isPlainObject(raw)) {
+    warnings.push(`"selection" section must be an object — default tuning kept`);
+    return structuredClone(DEFAULT_SELECTION);
+  }
+  const tuning: SelectionTuning = structuredClone(DEFAULT_SELECTION);
+
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") tuning.enabled = raw.enabled;
+    else warnings.push(`selection.enabled must be a boolean — default kept`);
+  }
+  if (raw.priceAnchor !== undefined) {
+    if (typeof raw.priceAnchor === "number" && Number.isFinite(raw.priceAnchor) && raw.priceAnchor > 0) {
+      tuning.priceAnchor = raw.priceAnchor;
+    } else {
+      warnings.push(`selection.priceAnchor must be a positive number — default kept`);
+    }
+  }
+  if (raw.weights !== undefined) {
+    if (isPlainObject(raw.weights)) {
+      for (const key of Object.keys(raw.weights)) {
+        if (key !== "budget" && key !== "flagship") {
+          warnings.push(`selection.weights.${key} is not a weight tier ("budget"|"flagship") — dropped`);
+        }
+      }
+      tuning.budgetWeights = parseWeights("budget", raw.weights.budget, tuning.budgetWeights, warnings);
+      tuning.flagshipWeights = parseWeights("flagship", raw.weights.flagship, tuning.flagshipWeights, warnings);
+    } else {
+      warnings.push(`selection.weights must be an object with "budget" and "flagship" — default weights kept`);
+    }
+  }
+  for (const key of Object.keys(raw)) {
+    if (!["enabled", "priceAnchor", "weights"].includes(key)) {
+      warnings.push(`selection.${key} is not a selection option — dropped`);
+    }
+  }
+  return tuning;
 }
 
 function defaultConfigPath(): string {
@@ -255,11 +357,33 @@ function readRequestsSection(
   };
 }
 
-export function loadRequestConfig(): LoadedRequestConfig {
+export function loadRequestConfig(
+  shippedPath: string = defaultConfigPath(),
+  userPath: string = userConfigPath(),
+): LoadedRequestConfig {
   const warnings: string[] = [];
 
-  const defaultRaw = readRequestsSection(readJsonFile(defaultConfigPath(), warnings, "shipped config"), warnings);
-  const userRaw = readRequestsSection(readJsonFile(userConfigPath(), warnings, "user config"), warnings);
+  const defaultFile = readJsonFile(shippedPath, warnings, "shipped config");
+  const userFile = readJsonFile(userPath, warnings, "user config");
+  const defaultRaw = readRequestsSection(defaultFile, warnings);
+  const userRaw = readRequestsSection(userFile, warnings);
+
+  for (const [label, file] of [
+    ["shipped config", defaultFile],
+    ["user config", userFile],
+  ] as const) {
+    if (file?.selection !== undefined && !isPlainObject(file.selection)) {
+      warnings.push(`${label}: "selection" section must be an object — default tuning kept`);
+    }
+  }
+  const mergedSelectionRaw =
+    isPlainObject(userFile?.selection) || isPlainObject(defaultFile?.selection)
+      ? deepMerge(
+          isPlainObject(defaultFile?.selection) ? defaultFile.selection : {},
+          isPlainObject(userFile?.selection) ? userFile.selection : {},
+        )
+      : undefined;
+  const selection = parseSelectionSection(mergedSelectionRaw, warnings);
 
   const defaultModels = defaultRaw.models;
   const userModels = userRaw.models;
@@ -293,5 +417,5 @@ export function loadRequestConfig(): LoadedRequestConfig {
     defaults: validatedDefaults,
     models: Object.keys(mergedModels).length > 0 ? new Map(Object.entries(mergedModels)) : undefined,
   };
-  return { config, warnings };
+  return { config, selection, warnings };
 }
