@@ -1,22 +1,31 @@
-import type { ScoredProvider, SelectionResult, StatEndpoint } from "./types.js";
+import type {
+  ScoredProvider,
+  SelectionResult,
+  SelectionWeights,
+  StatEndpoint,
+  SelectionTuning,
+} from "./types.js";
 
 type Row = StatEndpoint & { _teff?: number; _tail?: number };
 
 /**
- * Just-in-time provider selection: adaptive weights with a $3.00/M price
- * anchor.
+ * Just-in-time provider selection: adaptive weights with a user-tunable
+ * price anchor.
  *
- * Under $3.00/M anchor (Budget / Workhorse: Luna, GLM-5.3, Flash, DeepSeek, Qwen):
+ * Below the anchor (budget tier — Luna, GLM-5.3, Flash, DeepSeek, Qwen):
  *   - Price differences are pennies per million tokens and should not override speed.
- *   - Weights: Throughput 0.55, Latency 0.20, Tool-call 0.15, Price 0.10.
- *   - Tiebreak: Within 5%, HIGHER THROUGHPUT wins the tie.
+ *   - Default weights: Throughput 0.55, Latency 0.20, Tool-call 0.15, Price 0.10.
  *
- * At or above $3.00/M anchor (Flagships: Terra, Sonnet, Opus):
+ * At or above the anchor (flagship tier — Terra, Sonnet, Opus):
  *   - Price spreads are real dollars ($1-4+/M) that justify speed tradeoffs.
- *   - Weights: Throughput 0.30, Latency 0.25, Tool-call 0.20, Price 0.25.
- *   - Tiebreak: Within 5%, CHEAPER PRICE wins the tie.
+ *   - Default weights: Throughput 0.30, Latency 0.25, Tool-call 0.20, Price 0.25.
  *
- * Gates (applied in order — a gated endpoint is out entirely):
+ * All of it is tunable per config file (`selection` section): the anchor,
+ * each weight set, and an enable/disable switch. Weight values are ratios —
+ * only their relative sizes matter, and a zero weight removes the axis from
+ * scoring AND tiebreaks (single-axis tuning is `{throughput: 1, rest: 0}`).
+ *
+ * Gates (applied in order — a gated endpoint is out entirely, never tunable):
  *   - disabled / private endpoints
  *   - service tiers (flex/fast/priority/highspeed) — never pin
  *   - no `tools` in supported_parameters
@@ -27,27 +36,26 @@ type Row = StatEndpoint & { _teff?: number; _tail?: number };
  *     OpenRouter's fallbacks cannot land on them
  */
 
-const PRICE_ANCHOR_PER_MILLION = 3.0;
-
-const BUDGET_WEIGHTS = {
-  throughput: 0.55,
-  latency: 0.20,
-  toolCall: 0.15,
-  price: 0.10,
-};
-
-const FLAGSHIP_WEIGHTS = {
-  throughput: 0.30,
-  latency: 0.25,
-  toolCall: 0.20,
-  price: 0.25,
-};
-
 const LATENCY_P50_WEIGHT = 0.5; // within the latency axis: p50 vs tail
 const TIE = 0.05;
 const STUNTED_RATIO = 0.5;
 const SAMPLE_GATE = 100;
 const ADVISORY_TPS_RATIO = 1.75;
+
+const AXIS_ORDER = ["throughput", "latency", "toolCall", "price"] as const;
+type Axis = (typeof AXIS_ORDER)[number];
+
+/**
+ * Tiebreak priority: descending weight among positively-weighted axes,
+ * ties in declaration order. The default weights reproduce the shipped
+ * tiebreaks (budget favored throughput first, flagship favored price
+ * ahead of tool-call via its heavier weight).
+ */
+export function tiebreakAxes(weights: SelectionWeights): Axis[] {
+  return [...AXIS_ORDER]
+    .sort((a, b) => weights[b] - weights[a])
+    .filter((axis) => weights[axis] > 0);
+}
 
 const TIER_SEGMENTS = new Set(["flex", "fast", "priority", "highspeed"]);
 const HEAVY_QUANT = new Set(["fp4", "nvfp4", "int4", "mxfp4"]);
@@ -107,6 +115,7 @@ export function scoreProviders(
   modelId: string,
   endpoints: StatEndpoint[],
   toolCallRates: Map<string, number>,
+  tuning: SelectionTuning,
 ): SelectionResult | undefined {
   // ---- gates ----
   let candidates = endpoints.filter(
@@ -208,8 +217,9 @@ export function scoreProviders(
     const cheapest = prices.length > 0 ? Math.min(...prices) : undefined;
 
     const isBudget =
-      medianPrice !== undefined && medianPrice * 1e6 < PRICE_ANCHOR_PER_MILLION;
-    const weights = isBudget ? BUDGET_WEIGHTS : FLAGSHIP_WEIGHTS;
+      medianPrice !== undefined && medianPrice * 1e6 < tuning.priceAnchor;
+    const weights = isBudget ? tuning.budgetWeights : tuning.flagshipWeights;
+    const tieOrder = tiebreakAxes(weights);
 
     for (const e of sampled as Row[]) {
       const tNorm = minMax(tEffs, e._teff ?? 0);
@@ -258,22 +268,24 @@ export function scoreProviders(
       const bTied = topScore > 0 ? (topScore - (b.score ?? 0)) / topScore <= TIE : true;
       if (aTied !== bTied) return aTied ? -1 : 1;
       if (aTied && bTied) {
-        // Unknown price carries no ordering information — fall through to the
-        // next criterion rather than letting undefined sort as free.
-        const priceCmp =
-          a.blendedPrice !== undefined && b.blendedPrice !== undefined
-            ? a.blendedPrice - b.blendedPrice
-            : 0;
-        if (isBudget) {
-          // Under $3.00/M: faster throughput wins ties, then lower latency, then cheaper price
-          if (a.tpsP50 !== b.tpsP50) return (b.tpsP50 ?? 0) - (a.tpsP50 ?? 0);
-          if (a.latP50 !== b.latP50) return (a.latP50 ?? 0) - (b.latP50 ?? 0);
-          if (priceCmp !== 0) return priceCmp;
-        } else {
-          // At or above $3.00/M: cheaper price wins ties, then lower latency, then throughput
-          if (priceCmp !== 0) return priceCmp;
-          if (a.latP50 !== b.latP50) return (a.latP50 ?? 0) - (b.latP50 ?? 0);
-          if (a.tpsP50 !== b.tpsP50) return (b.tpsP50 ?? 0) - (a.tpsP50 ?? 0);
+        // Weight-desc axis order: the user's dominant axis decides ties.
+        // Undefined values carry no ordering information — the axis is
+        // skipped rather than letting undefined sort as free or fastest.
+        for (const axis of tieOrder) {
+          if (axis === "throughput") {
+            if ((a.tpsP50 ?? 0) !== (b.tpsP50 ?? 0)) return (b.tpsP50 ?? 0) - (a.tpsP50 ?? 0);
+          } else if (axis === "latency") {
+            if ((a.latP50 ?? 0) !== (b.latP50 ?? 0)) return (a.latP50 ?? 0) - (b.latP50 ?? 0);
+          } else if (axis === "price") {
+            if (a.blendedPrice !== undefined && b.blendedPrice !== undefined
+                && a.blendedPrice !== b.blendedPrice) {
+              return a.blendedPrice - b.blendedPrice;
+            }
+          } else if (axis === "toolCall") {
+            const ar = a.toolCallErrorRate;
+            const br = b.toolCallErrorRate;
+            if (ar !== undefined && br !== undefined && ar !== br) return ar - br;
+          }
         }
       }
       return (b.score ?? 0) - (a.score ?? 0);
