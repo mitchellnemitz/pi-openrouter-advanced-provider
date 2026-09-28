@@ -18,10 +18,13 @@ selection, and real context windows.
   the serving provider's endpoint data, not the catalog maximum, so pi
   budgets and compacts against what the route actually offers.
 - **Just-in-time provider selection.** See below.
-- **Sentinel pricing handled.** OpenRouter reports `"-1"` pricing for router
-  slugs (`openrouter/auto`, `openrouter/auto-beta`) since the price varies
-  with the routed model; this extension treats that sentinel as unknown
-  pricing instead of a literal -$1M/M token rate.
+- **Router cost accounting.** OpenRouter reports `"-1"` pricing for
+  `openrouter/auto` and `openrouter/auto-beta` because their price varies
+  with the routed model. The extension captures the billed cost from each
+  router response stream and puts it on the completed assistant message,
+  so pi's session total uses the actual charge instead of zero. If the
+  stream does not report a cost, it leaves the message unchanged rather
+  than guessing from another model's list price.
 - **Clean info channel.** Extension info messages (`/openrouter-status`,
   `/openrouter-balance`) are kept out of the LLM context, so account and
   status text never pollutes prompts.

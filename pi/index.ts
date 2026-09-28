@@ -19,6 +19,7 @@ import {
   fetchCredits,
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
+import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import { loadRequestConfig, mergeRequestConfig, isVariantModelId } from "./config.js";
 import {
   COST_TIERS,
@@ -53,6 +54,28 @@ function emitMessage(pi: ExtensionAPI, text: string) {
 }
 
 export default async function openrouterModelsExtension(pi: ExtensionAPI) {
+  // Pi prices router slugs from their zero-cost catalog entry rather than the
+  // model OpenRouter served. Capture its billed SSE cost once per response and
+  // replace the finalized message so session totals see the real amount.
+  const key = Symbol.for("pi-openrouter-advanced-provider:router-cost");
+  const globals = globalThis as any;
+  const costState: {
+    wrapped: boolean;
+    captures: Map<string, Promise<number | undefined>>;
+  } = globals[key] ??= { wrapped: false, captures: new Map() };
+  if (!costState.wrapped) {
+    // Reload intentionally keeps this first wrapper: it closes over the
+    // original module's parsing code, so wrapper changes need a process
+    // restart. Re-wrapping on every load would stack wrappers instead.
+    globalThis.fetch = wrapRouterCostFetch(globalThis.fetch, costState.captures);
+    costState.wrapped = true;
+  }
+  pi.on("message_end", async (event) => {
+    if (event.message.role !== "assistant") return;
+    const message = await restoreRouterCost(event.message, costState.captures);
+    if (message) return { message };
+  });
+
   // ---------- Per-model config overrides ----------
 
   // Optional escape hatch: openrouter-advanced-provider.json (shipped empty) +
