@@ -7,10 +7,12 @@ function isRouter(model: string): boolean {
   return model === "openrouter/auto" || model === "openrouter/auto-beta";
 }
 
-function isRouterRequest(input: string | URL | Request, init?: RequestInit): boolean {
+function isRouterRequest(input: string | URL, init?: RequestInit): boolean {
+  // Matches the (url, init) call form pi-ai's transport uses. A Request-object
+  // first argument carries its body as a stream and is not recognized.
   if (typeof init?.body !== "string") return false;
   try {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const raw = typeof input === "string" ? input : input.href;
     const url = new URL(raw);
     return url.hostname === "openrouter.ai" && url.pathname.endsWith("/chat/completions")
       && isRouter(JSON.parse(init.body).model);
@@ -59,7 +61,7 @@ async function captureCost(body: ReadableStream<Uint8Array>, captures: Captures)
 
 export function wrapRouterCostFetch(originalFetch: typeof fetch, captures: Captures): typeof fetch {
   return async (input, init) => {
-    if (!isRouterRequest(input, init)) return originalFetch(input, init);
+    if (!isRouterRequest(input as string | URL, init)) return originalFetch(input, init);
     const response = await originalFetch(input, init);
     if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
     const [forPi, forCost] = response.body.tee();
@@ -73,6 +75,8 @@ export async function restoreRouterCost(message: Assistant, captures: Captures):
       message.stopReason === "error" || message.stopReason === "aborted" || message.usage.cost.total > 0) return;
   let captured = captures.get(message.responseId);
   if (!captured) {
+    // The tee coroutine usually registers the capture during stream reading,
+    // but message_end can win the race; yield once and look again.
     await new Promise((resolve) => setTimeout(resolve, 0));
     captured = captures.get(message.responseId);
   }

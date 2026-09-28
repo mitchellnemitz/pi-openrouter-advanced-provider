@@ -64,6 +64,9 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     captures: Map<string, Promise<number | undefined>>;
   } = globals[key] ??= { wrapped: false, captures: new Map() };
   if (!costState.wrapped) {
+    // Reload intentionally keeps this first wrapper: it closes over the
+    // original module's parsing code, so wrapper changes need a process
+    // restart. Re-wrapping on every load would stack wrappers instead.
     globalThis.fetch = wrapRouterCostFetch(globalThis.fetch, costState.captures);
     costState.wrapped = true;
   }

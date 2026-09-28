@@ -69,6 +69,21 @@ it("leaves the message unchanged when the stream has no billed cost", async () =
   assert.equal(await cost.restoreRouterCost(message("openrouter/auto"), captures), undefined);
 });
 
+it("retries once when message_end wins the registration race", async () => {
+  const captures = new Map<string, Promise<number | undefined>>();
+  // Capture registers a tick after restoreRouterCost's first lookup.
+  setTimeout(() => captures.set("gen-a", Promise.resolve(0.009)), 1);
+  assert.equal((await cost.restoreRouterCost(message("openrouter/auto"), captures))?.usage.cost.total, 0.009);
+});
+
+it("gives up after 250ms when the billed cost never resolves", async () => {
+  const captures = new Map([["gen-a", new Promise<number | undefined>(() => {})]]);
+  const started = Date.now();
+  assert.equal(await cost.restoreRouterCost(message("openrouter/auto"), captures), undefined);
+  assert.ok(Date.now() - started >= 200);
+  assert.equal(captures.has("gen-a"), false);
+});
+
 it("does not inspect concrete-model requests", async () => {
   assert.equal(typeof cost.wrapRouterCostFetch, "function");
   const captures = new Map<string, Promise<number | undefined>>();
