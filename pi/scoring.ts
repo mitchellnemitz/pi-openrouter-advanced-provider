@@ -46,10 +46,9 @@ const AXIS_ORDER = ["throughput", "latency", "toolCall", "price"] as const;
 type Axis = (typeof AXIS_ORDER)[number];
 
 /**
- * Tiebreak priority: descending weight among positively-weighted axes,
- * ties in declaration order. The default weights reproduce the shipped
- * tiebreaks (budget favored throughput first, flagship favored price
- * ahead of tool-call via its heavier weight).
+ * Tiebreak priority for scores inside the tie band: descending weight
+ * among positively-weighted axes, equal weights in declaration order —
+ * the order mirrors what the user told the algorithm to care about most.
  */
 export function tiebreakAxes(weights: SelectionWeights): Axis[] {
   return [...AXIS_ORDER]
@@ -269,13 +268,13 @@ export function scoreProviders(
       if (aTied !== bTied) return aTied ? -1 : 1;
       if (aTied && bTied) {
         // Weight-desc axis order: the user's dominant axis decides ties.
-        // Undefined values carry no ordering information — the axis is
-        // skipped rather than letting undefined sort as free or fastest.
+        // Undefined values carry no ordering information — an axis where
+        // either row is undefined is skipped, never sorted as free/fastest.
         for (const axis of tieOrder) {
           if (axis === "throughput") {
-            if ((a.tpsP50 ?? 0) !== (b.tpsP50 ?? 0)) return (b.tpsP50 ?? 0) - (a.tpsP50 ?? 0);
+            if (a.tpsP50 !== undefined && b.tpsP50 !== undefined && a.tpsP50 !== b.tpsP50) return b.tpsP50 - a.tpsP50;
           } else if (axis === "latency") {
-            if ((a.latP50 ?? 0) !== (b.latP50 ?? 0)) return (a.latP50 ?? 0) - (b.latP50 ?? 0);
+            if (a.latP50 !== undefined && b.latP50 !== undefined && a.latP50 !== b.latP50) return a.latP50 - b.latP50;
           } else if (axis === "price") {
             if (a.blendedPrice !== undefined && b.blendedPrice !== undefined
                 && a.blendedPrice !== b.blendedPrice) {

@@ -94,8 +94,8 @@ it.
 
 One file name, two locations — the location differentiates, nothing else:
 
-- `pi/openrouter-advanced-provider.json` — shipped defaults for the routing
-  config and the selection tuning below.
+- `pi/openrouter-advanced-provider.json` — shipped defaults for the selection
+  tuning below.
 - `~/.pi/agent/openrouter-advanced-provider.json` — user overrides, merged
   per-field on top. Reload via `/openrouter-sync` after editing.
 

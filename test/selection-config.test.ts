@@ -6,8 +6,15 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_SELECTION, parseSelectionSection } from "../pi/config.ts";
+import {
+  DEFAULT_SELECTION,
+  loadRequestConfig,
+  parseSelectionSection,
+} from "../pi/config.ts";
 
 const warningsTo = (fn: (w: string[]) => unknown): { result: unknown; warnings: string[] } => {
   const warnings: string[] = [];
@@ -112,5 +119,97 @@ describe("parseSelectionSection", () => {
     warningsTo((w) => parseSelectionSection({ priceAnchor: 9, weights: { budget: { price: 1 } } }, w));
     assert.equal(DEFAULT_SELECTION.priceAnchor, 3.0);
     assert.equal(DEFAULT_SELECTION.budgetWeights.price, 0.1);
+  });
+
+  it("rejects NaN and Infinity price anchors", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { result, warnings } = warningsTo((w) => parseSelectionSection({ priceAnchor: bad }, w));
+      assert.equal((result as any).priceAnchor, 3.0);
+      assert.equal(warnings.length, 1);
+    }
+  });
+
+  it("rejects negative weight values", () => {
+    const { result, warnings } = warningsTo((w) =>
+      parseSelectionSection({ weights: { budget: { price: -0.5 } } }, w),
+    );
+    assert.equal((result as any).budgetWeights.price, 0.1);
+    assert.equal(warnings.length, 1);
+  });
+
+  it("keeps the default weights when the weights section is not an object", () => {
+    const { result, warnings } = warningsTo((w) => parseSelectionSection({ weights: "fast" }, w));
+    assert.deepEqual((result as any).budgetWeights, DEFAULT_SELECTION.budgetWeights);
+    assert.equal(warnings.length, 1);
+  });
+
+  it("keeps the default budget weights when the budget tier is all zero", () => {
+    const { result, warnings } = warningsTo((w) =>
+      parseSelectionSection({ weights: { budget: { throughput: 0, latency: 0, toolCall: 0, price: 0 } } }, w),
+    );
+    assert.deepEqual((result as any).budgetWeights, DEFAULT_SELECTION.budgetWeights);
+    assert.equal((result as any).flagshipWeights.throughput, 0.3);
+    assert.equal(warnings.length, 1);
+  });
+
+  it("warns on unknown weight tiers instead of silently dropping them", () => {
+    const { result, warnings } = warningsTo((w) =>
+      parseSelectionSection({ weights: { midrange: { throughput: 1 } } }, w),
+    );
+    assert.deepEqual((result as any).budgetWeights, DEFAULT_SELECTION.budgetWeights);
+    assert.equal(warnings.length, 1);
+  });
+
+  it("pinned: the shipped config file carries the built-in defaults", () => {
+    const shipped = JSON.parse(
+      fs.readFileSync(path.join(import.meta.dirname, "..", "pi", "openrouter-advanced-provider.json"), "utf-8"),
+    );
+    assert.deepEqual(shipped.selection, {
+      enabled: DEFAULT_SELECTION.enabled,
+      priceAnchor: DEFAULT_SELECTION.priceAnchor,
+      weights: { budget: DEFAULT_SELECTION.budgetWeights, flagship: DEFAULT_SELECTION.flagshipWeights },
+    });
+  });
+});
+
+describe("loadRequestConfig selection seam", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seltune-cfg-"));
+  const write = (name: string, content: unknown) => {
+    const file = path.join(tmp, name);
+    fs.writeFileSync(file, JSON.stringify(content));
+    return file;
+  };
+
+  it("merges shipped and user selection per field, surviving false and zero", () => {
+    const shipped = write("shipped.json", {
+      selection: { priceAnchor: 4.0, weights: { budget: { price: 0.2 } } },
+    });
+    const user = write("user.json", {
+      selection: { enabled: false, weights: { budget: { price: 0 }, flagship: { throughput: 0.9 } } },
+    });
+    const loaded = loadRequestConfig(shipped, user);
+    assert.equal(loaded.selection.enabled, false);
+    assert.equal(loaded.selection.priceAnchor, 4.0);
+    assert.equal(loaded.selection.budgetWeights.price, 0);
+    assert.equal(loaded.selection.budgetWeights.throughput, 0.55);
+    assert.equal(loaded.selection.flagshipWeights.throughput, 0.9);
+    assert.equal(loaded.selection.flagshipWeights.price, 0.25);
+    assert.deepEqual(loaded.warnings, []);
+  });
+
+  it("warns and keeps defaults when the user selection section is not an object", () => {
+    const shipped = write("shipped2.json", {});
+    const user = write("user2.json", { selection: 5 });
+    const loaded = loadRequestConfig(shipped, user);
+    assert.deepEqual(loaded.selection, DEFAULT_SELECTION);
+    assert.ok(loaded.warnings.some((warning) => warning.includes("selection")));
+  });
+
+  it("warns on an unknown weight tier coming from a real file", () => {
+    const shipped = write("shipped3.json", {});
+    const user = write("user3.json", { selection: { weights: { midrange: { throughput: 1 } } } });
+    const loaded = loadRequestConfig(shipped, user);
+    assert.deepEqual(loaded.selection.budgetWeights, DEFAULT_SELECTION.budgetWeights);
+    assert.ok(loaded.warnings.some((warning) => warning.includes("midrange")));
   });
 });

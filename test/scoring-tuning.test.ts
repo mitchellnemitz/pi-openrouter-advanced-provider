@@ -71,16 +71,24 @@ describe("scoreProviders tuning", () => {
     assert.equal(result?.pick, "slow/region");
   });
 
-  it("priceAnchor moves the budget/flagship split", () => {
-    const cheap = tuned({ priceAnchor: 0.5 });
-    const pricey = tuned({ priceAnchor: 9 });
-    const a = scoreProviders("m", ENDPOINTS, NO_TOOL_RATES, cheap);
-    const b = scoreProviders("m", ENDPOINTS, NO_TOOL_RATES, pricey);
-    assert.ok(a && b);
-    // fast/region blended price ~$4.69/M, slow/region ~$0.22/M, median ~$2.45/M:
-    // anchor 0.5 -> flagship weights; anchor 9 -> budget weights. Same pick,
-    // measurably different scores.
-    assert.notEqual(a.table[0].score, b.table[0].score);
+  it("priceAnchor moves the budget/flagship split (hand-computed per-tier scores)", () => {
+    // fast/region blended $2.625/M, slow/region $0.219/M, median $1.42/M:
+    // anchor 0.5 -> flagship weights, anchor 9 -> budget weights. The two rows
+    // have equal latency (score 1 each), unmeasured tool-call quality (0.85
+    // each), and split throughput/price min-max 1/0, so the per-tier weighted
+    // totals are exactly:
+    //   budget   (0.55/0.20/0.15/0.10): fast 0.8775, slow 0.4275
+    //   flagship (0.30/0.25/0.20/0.25): fast 0.72,   slow 0.67
+    const flagship = scoreProviders("m", ENDPOINTS, NO_TOOL_RATES, tuned({ priceAnchor: 0.5 }));
+    const budget = scoreProviders("m", ENDPOINTS, NO_TOOL_RATES, tuned({ priceAnchor: 9 }));
+    assert.ok(flagship && budget);
+    const near = (a: number | undefined, b: number) => assert.ok(Math.abs((a ?? NaN) - b) < 1e-9);
+    const byTag = (r: NonNullable<ReturnType<typeof scoreProviders>>) =>
+      Object.fromEntries(r.table.map((row) => [row.tag, row.score]));
+    near(byTag(flagship)["fast/region"], 0.72);
+    near(byTag(flagship)["slow/region"], 0.67);
+    near(byTag(budget)["fast/region"], 0.8775);
+    near(byTag(budget)["slow/region"], 0.4275);
   });
 
   it("single-axis tuning picks strictly by that axis (throughput max)", () => {
@@ -95,6 +103,58 @@ describe("scoreProviders tuning", () => {
     // The disabled axes contribute nothing: the winner's score equals the
     // normalized throughput score alone (1.0 for the fastest row).
     assert.equal(result?.table[0].score, 1);
+  });
+
+  it("single-axis latency tuning picks the lower-latency provider", () => {
+    const tuning = tuned({
+      weights: {
+        budget: { throughput: 0, latency: 1, toolCall: 0, price: 0 },
+        flagship: { throughput: 0, latency: 1, toolCall: 0, price: 0 },
+      },
+    });
+    const endpoints = [
+      endpoint({ id: "laggy/region", provider_slug: "laggy/region" }),
+      endpoint({
+        id: "snappy/region",
+        provider_slug: "snappy/region",
+        stats: { p50_latency: 250, p99_latency: 300, p50_throughput: 5, p99_throughput: 6, request_count: 500 },
+      }),
+    ];
+    const result = scoreProviders("m", endpoints, NO_TOOL_RATES, tuning);
+    assert.equal(result?.pick, "snappy/region");
+  });
+
+  it("single-axis tool-call tuning picks the lower error rate regardless of speed", () => {
+    const tuning = tuned({
+      weights: {
+        budget: { throughput: 0, latency: 0, toolCall: 1, price: 0 },
+        flagship: { throughput: 0, latency: 0, toolCall: 1, price: 0 },
+      },
+    });
+    const rates = new Map([
+      ["fast/region", 0.1],
+      ["slow/region", 0.01],
+    ]);
+    const result = scoreProviders("m", ENDPOINTS, rates, tuning);
+    assert.equal(result?.pick, "slow/region");
+  });
+
+  it("breaks score ties along the highest-weighted axis first", () => {
+    // Symmetric pair under {throughput: 0.5, price: 0.5}: both rows score
+    // exactly 0.5 (each owns one min-max extreme), so the tie band decides —
+    // throughput and price carry equal weight, and declaration order puts
+    // throughput first, so the faster row wins.
+    const tuning = tuned({
+      weights: {
+        budget: { throughput: 0.5, latency: 0, toolCall: 0, price: 0.5 },
+        flagship: { throughput: 0.5, latency: 0, toolCall: 0, price: 0.5 },
+      },
+    });
+    const result = scoreProviders("m", ENDPOINTS, NO_TOOL_RATES, tuning);
+    assert.equal(result?.pick, "fast/region");
+    const scores = result!.table.map((row) => row.score);
+    assert.ok(Math.abs((scores[0] ?? 0) - 0.5) < 1e-9);
+    assert.ok(Math.abs((scores[1] ?? 0) - 0.5) < 1e-9);
   });
 
   it("still gates stunted-context and heavy-quantization rows under custom weights", () => {

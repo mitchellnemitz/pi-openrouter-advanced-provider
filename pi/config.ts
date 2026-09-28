@@ -189,6 +189,11 @@ export function parseSelectionSection(raw: unknown, warnings: string[]): Selecti
   }
   if (raw.weights !== undefined) {
     if (isPlainObject(raw.weights)) {
+      for (const key of Object.keys(raw.weights)) {
+        if (key !== "budget" && key !== "flagship") {
+          warnings.push(`selection.weights.${key} is not a weight tier ("budget"|"flagship") — dropped`);
+        }
+      }
       tuning.budgetWeights = parseWeights("budget", raw.weights.budget, tuning.budgetWeights, warnings);
       tuning.flagshipWeights = parseWeights("flagship", raw.weights.flagship, tuning.flagshipWeights, warnings);
     } else {
@@ -352,14 +357,25 @@ function readRequestsSection(
   };
 }
 
-export function loadRequestConfig(): LoadedRequestConfig {
+export function loadRequestConfig(
+  shippedPath: string = defaultConfigPath(),
+  userPath: string = userConfigPath(),
+): LoadedRequestConfig {
   const warnings: string[] = [];
 
-  const defaultFile = readJsonFile(defaultConfigPath(), warnings, "shipped config");
-  const userFile = readJsonFile(userConfigPath(), warnings, "user config");
+  const defaultFile = readJsonFile(shippedPath, warnings, "shipped config");
+  const userFile = readJsonFile(userPath, warnings, "user config");
   const defaultRaw = readRequestsSection(defaultFile, warnings);
   const userRaw = readRequestsSection(userFile, warnings);
 
+  for (const [label, file] of [
+    ["shipped config", defaultFile],
+    ["user config", userFile],
+  ] as const) {
+    if (file?.selection !== undefined && !isPlainObject(file.selection)) {
+      warnings.push(`${label}: "selection" section must be an object — default tuning kept`);
+    }
+  }
   const mergedSelectionRaw =
     isPlainObject(userFile?.selection) || isPlainObject(defaultFile?.selection)
       ? deepMerge(
