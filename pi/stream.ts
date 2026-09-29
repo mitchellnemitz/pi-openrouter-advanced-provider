@@ -19,24 +19,39 @@ import {
   type Model,
   type SimpleStreamOptions,
   type TranscriptContext,
-} from "@earendil-works/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   driveRecoveryLoop,
   stripReasoningReplaySignatures,
   type AttemptSpec,
   type RecoveryAction,
   type RecoveryState,
-} from "./recovery.js";
+} from "./recovery.ts";
 
-function delegateStream(
+export type StreamSimpleDelegate = (
+  model: Model<Api>,
+  context: TranscriptContext,
+  options?: SimpleStreamOptions,
+) => AssistantMessageEventStream;
+
+function defaultDelegate(
   model: Model<Api>,
   context: TranscriptContext,
   options: SimpleStreamOptions | undefined,
 ): AssistantMessageEventStream {
+  if (model.api !== "openai-completions") {
+    throw new Error(`OpenRouter recovery wrapper expects api "openai-completions", got "${model.api}"`);
+  }
   return openAICompletionsApi().streamSimple(model as Model<"openai-completions">, context, options);
 }
 
-function syncThrowErrorEvent(model: Model<Api>, error: unknown): AssistantMessageEvent {
+function syncThrowErrorEvent(
+  model: Model<Api>,
+  error: unknown,
+  options?: SimpleStreamOptions,
+): AssistantMessageEvent {
+  const isAborted = options?.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+  const stopReason = isAborted ? "aborted" : "error";
   const message: AssistantMessage = {
     role: "assistant",
     content: [],
@@ -51,17 +66,18 @@ function syncThrowErrorEvent(model: Model<Api>, error: unknown): AssistantMessag
       totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
-    stopReason: "error",
-    errorMessage: error instanceof Error ? error.message : String(error),
+    stopReason,
+    errorMessage: isAborted ? "Request was aborted" : error instanceof Error ? error.message : String(error),
     timestamp: Date.now(),
   };
-  return { type: "error", reason: "error", error: message };
+  return { type: "error", reason: stopReason, error: message };
 }
 
 export function streamOpenRouterWithRecovery(
   model: Model<Api>,
   context: TranscriptContext,
   options?: SimpleStreamOptions,
+  delegate: StreamSimpleDelegate = defaultDelegate,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
 
@@ -82,17 +98,25 @@ export function streamOpenRouterWithRecovery(
 
       const outcome = await driveRecoveryLoop(
         (spec) =>
-          delegateStream(model, { ...context, messages: spec.messages } as TranscriptContext, spec.options),
+          delegate(model, { ...context, messages: spec.messages } as TranscriptContext, spec.options),
         applyRetry,
         initial,
         state,
         (event) => stream.push(event),
       );
 
-      if (!outcome.succeeded && outcome.lastError) stream.push(outcome.lastError);
+      if (!outcome.succeeded) {
+        if (outcome.lastError) {
+          stream.push(outcome.lastError);
+        } else {
+          stream.push(
+            syncThrowErrorEvent(model, new Error("Stream completed without a terminal event"), options),
+          );
+        }
+      }
       stream.end();
     } catch (error) {
-      stream.push(syncThrowErrorEvent(model, error));
+      stream.push(syncThrowErrorEvent(model, error, options));
       stream.end();
     }
   })();

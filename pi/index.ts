@@ -367,7 +367,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       if (isStale(generation)) return;
       commitSnapshot(generation, result.models);
-      registerStandalone(result.models, false);
+      registerStandalone(result.models, true);
       // The registered snapshot changed: selections (and their recorded base
       // limits) from the previous catalog are stale.
       clearSelections();
