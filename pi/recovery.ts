@@ -136,7 +136,10 @@ export async function driveRecoveryLoop<TEvent extends { type: string }, TOption
         // guard keeps it true by construction.
         if (forwarded) break;
         const action = planErrorRecovery((event as { error?: { errorMessage?: string } })?.error?.errorMessage, state);
-        if (action) attempt = applyRetry(action, current);
+        if (action) {
+          lastError = undefined;
+          attempt = applyRetry(action, current);
+        }
         break;
       }
       if (event.type === "done") succeeded = true;

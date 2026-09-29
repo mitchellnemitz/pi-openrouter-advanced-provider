@@ -15,6 +15,8 @@ import {
   type RecoveryState,
 } from "../pi/recovery.ts";
 import {
+  defaultDelegate,
+  buildStandaloneProviderConfig,
   streamOpenRouterWithRecovery,
   type StreamSimpleDelegate,
 } from "../pi/stream.ts";
@@ -455,5 +457,39 @@ describe("streamOpenRouterWithRecovery", () => {
     assert.equal(events.length, 1);
     assert.equal(events[0].type, "error");
     assert.equal(events[0].error.errorMessage, "Synchronous network failure");
+  });
+});
+
+describe("defaultDelegate", () => {
+  it("rejects non-openai-completions models with an informative error", () => {
+    const model = {
+      ...fakeModel(),
+      api: "anthropic-messages" as any,
+    };
+    const context: TranscriptContext = { messages: [] };
+    assert.throws(
+      () => defaultDelegate(model, context),
+      /OpenRouter recovery wrapper expects api "openai-completions", got "anthropic-messages"/,
+    );
+  });
+
+  it("returns an AssistantMessageEventStream for completions models", () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    const stream = defaultDelegate(model, context);
+    assert.ok(stream);
+    assert.equal(typeof stream.push, "function");
+    assert.equal(typeof stream.end, "function");
+  });
+});
+
+describe("buildStandaloneProviderConfig", () => {
+  it("attaches api, streamSimple recovery wrapper, and X-Title header", () => {
+    const dummyModels = [fakeModel()];
+    const config = buildStandaloneProviderConfig(dummyModels as any);
+    assert.equal(config.api, "openai-completions");
+    assert.equal(config.streamSimple, streamOpenRouterWithRecovery);
+    assert.equal(config.headers["X-Title"], "openrouter-advanced-provider");
+    assert.deepEqual(config.models, dummyModels);
   });
 });

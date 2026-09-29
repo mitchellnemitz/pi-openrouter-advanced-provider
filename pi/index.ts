@@ -19,7 +19,7 @@ import {
   fetchCredits,
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
-import { streamOpenRouterWithRecovery } from "./stream.js";
+import { buildStandaloneProviderConfig, streamOpenRouterWithRecovery } from "./stream.js";
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import {
   DEFAULT_SELECTION,
@@ -309,26 +309,11 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
    * thought signatures. Pi merges re-registrations key by key — defined
    * values win, undefined values preserve what is beneath — so leaving
    * apiKey/baseUrl undefined keeps the builtin defaults in standalone
-   * mode. The wrapper (api + streamSimple) is attached only after session
-   * sync confirms standalone registration: the load-time bootstrap registers
-   * models only and does not touch api.
+   * mode. Attaching api and streamSimple routes completions requests through
+   * the recovery wrapper while leaving non-completions APIs to base dispatch.
    */
-  function registerStandalone(models: ProviderRegistration["models"], withRecoveryWrapper = true) {
-    pi.registerProvider(
-      PROVIDER_NAME,
-      {
-        models: models!,
-        ...(withRecoveryWrapper && {
-          api: "openai-completions",
-          streamSimple: streamOpenRouterWithRecovery,
-        }),
-        headers: {
-          // No HTTP-Referer: this extension sends no public site URL.
-          // X-Title identifies the app in OpenRouter's stats.
-          "X-Title": APP_TITLE,
-        },
-      } as any,
-    );
+  function registerStandalone(models: ProviderRegistration["models"]) {
+    pi.registerProvider(PROVIDER_NAME, buildStandaloneProviderConfig(models) as any);
   }
 
   /**
@@ -367,7 +352,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       if (isStale(generation)) return;
       commitSnapshot(generation, result.models);
-      registerStandalone(result.models, true);
+      registerStandalone(result.models);
       // The registered snapshot changed: selections (and their recorded base
       // limits) from the previous catalog are stale.
       clearSelections();
@@ -394,7 +379,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       if (isStale(generation)) return;
       commitSnapshot(generation, result.models);
-      registerStandalone(result.models, true);
+      registerStandalone(result.models);
       // The registered snapshot changed: stale selections (and their recorded
       // base limits) from the previous catalog must not survive the sync.
       clearSelections();

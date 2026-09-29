@@ -34,10 +34,10 @@ export type StreamSimpleDelegate = (
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
-function defaultDelegate(
+export function defaultDelegate(
   model: Model<Api>,
   context: TranscriptContext,
-  options: SimpleStreamOptions | undefined,
+  options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   if (model.api !== "openai-completions") {
     throw new Error(`OpenRouter recovery wrapper expects api "openai-completions", got "${model.api}"`);
@@ -71,6 +71,21 @@ function syncThrowErrorEvent(
     timestamp: Date.now(),
   };
   return { type: "error", reason: stopReason, error: message };
+}
+
+export const APP_TITLE = "openrouter-advanced-provider";
+
+export function buildStandaloneProviderConfig(models: unknown[] | undefined) {
+  return {
+    models: models ?? [],
+    api: "openai-completions",
+    streamSimple: streamOpenRouterWithRecovery,
+    headers: {
+      // No HTTP-Referer: this extension sends no public site URL.
+      // X-Title identifies the app in OpenRouter's stats.
+      "X-Title": APP_TITLE,
+    },
+  };
 }
 
 export function streamOpenRouterWithRecovery(
