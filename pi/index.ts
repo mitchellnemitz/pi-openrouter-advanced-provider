@@ -19,6 +19,7 @@ import {
   fetchCredits,
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
+import { buildStandaloneProviderConfig, streamOpenRouterWithRecovery } from "./stream.js";
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import {
   DEFAULT_SELECTION,
@@ -304,21 +305,15 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // ---------- Provider registration (standalone catalog) ----------
 
   /**
-   * Models-only registration. Pi merges re-registrations key by key — defined
+   * Models registration plus the failure-recovery streamSimple wrapper for
+   * thought signatures. Pi merges re-registrations key by key — defined
    * values win, undefined values preserve what is beneath — so leaving
-   * api/apiKey/baseUrl undefined keeps pi's builtin OpenRouter serving
-   * defaults (transport, auth handling) active underneath. This extension
-   * owns the catalog; serving stays with the builtin transport.
+   * apiKey/baseUrl undefined keeps the builtin defaults in standalone
+   * mode. Attaching api and streamSimple routes completions requests through
+   * the recovery wrapper while leaving non-completions APIs to base dispatch.
    */
   function registerStandalone(models: ProviderRegistration["models"]) {
-    pi.registerProvider(PROVIDER_NAME, {
-      models: models!,
-      headers: {
-        // No HTTP-Referer: this extension sends no public site URL.
-        // X-Title identifies the app in OpenRouter's stats.
-        "X-Title": APP_TITLE,
-      },
-    } as any);
+    pi.registerProvider(PROVIDER_NAME, buildStandaloneProviderConfig(models) as any);
   }
 
   /**
