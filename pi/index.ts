@@ -19,6 +19,7 @@ import {
   fetchCredits,
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
+import { streamOpenRouterWithRecovery } from "./stream.js";
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import {
   DEFAULT_SELECTION,
@@ -304,21 +305,30 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // ---------- Provider registration (standalone catalog) ----------
 
   /**
-   * Models-only registration. Pi merges re-registrations key by key — defined
+   * Models registration plus the failure-recovery streamSimple wrapper for
+   * thought signatures. Pi merges re-registrations key by key — defined
    * values win, undefined values preserve what is beneath — so leaving
-   * api/apiKey/baseUrl undefined keeps pi's builtin OpenRouter serving
-   * defaults (transport, auth handling) active underneath. This extension
-   * owns the catalog; serving stays with the builtin transport.
+   * apiKey/baseUrl undefined keeps the builtin defaults in standalone
+   * mode. The wrapper (api + streamSimple) is attached only after session
+   * sync confirms standalone registration: the load-time bootstrap registers
+   * models only and does not touch api.
    */
-  function registerStandalone(models: ProviderRegistration["models"]) {
-    pi.registerProvider(PROVIDER_NAME, {
-      models: models!,
-      headers: {
-        // No HTTP-Referer: this extension sends no public site URL.
-        // X-Title identifies the app in OpenRouter's stats.
-        "X-Title": APP_TITLE,
-      },
-    } as any);
+  function registerStandalone(models: ProviderRegistration["models"], withRecoveryWrapper = true) {
+    pi.registerProvider(
+      PROVIDER_NAME,
+      {
+        models: models!,
+        ...(withRecoveryWrapper && {
+          api: "openai-completions",
+          streamSimple: streamOpenRouterWithRecovery,
+        }),
+        headers: {
+          // No HTTP-Referer: this extension sends no public site URL.
+          // X-Title identifies the app in OpenRouter's stats.
+          "X-Title": APP_TITLE,
+        },
+      } as any,
+    );
   }
 
   /**
@@ -357,7 +367,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       if (isStale(generation)) return;
       commitSnapshot(generation, result.models);
-      registerStandalone(result.models);
+      registerStandalone(result.models, false);
       // The registered snapshot changed: selections (and their recorded base
       // limits) from the previous catalog are stale.
       clearSelections();
@@ -384,7 +394,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
       if (isStale(generation)) return;
       commitSnapshot(generation, result.models);
-      registerStandalone(result.models);
+      registerStandalone(result.models, true);
       // The registered snapshot changed: stale selections (and their recorded
       // base limits) from the previous catalog must not survive the sync.
       clearSelections();

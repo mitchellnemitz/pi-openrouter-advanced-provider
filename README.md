@@ -28,6 +28,13 @@ selection, and real context windows.
 - **Clean info channel.** Extension info messages (`/openrouter-status`,
   `/openrouter-balance`) are kept out of the LLM context, so account and
   status text never pollutes prompts.
+- **Thought signature failover recovery.** Pi replays prior assistant reasoning
+  as reasoning_details with encrypted signatures. When OpenRouter fails over
+  between a model's backing providers (such as Gemini across Google AI Studio and
+  Vertex AI), the new provider cannot validate the prior provider's signature
+  and rejects the request with an invalid thought signature 400 error. The
+  extension automatically catches this error, strips reasoning replay signatures
+  from the request context, and retries once without signatures.
 
 ## API key
 
