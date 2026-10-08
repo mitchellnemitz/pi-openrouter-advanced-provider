@@ -19,6 +19,7 @@ import {
   fetchCredits,
 } from "./api.js";
 import { scoreProviders } from "./scoring.js";
+import { clampedSelectionLimits } from "./limits.js";
 import { buildStandaloneProviderConfig, streamOpenRouterWithRecovery } from "./stream.js";
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import {
@@ -180,11 +181,14 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
       baseRegistration.set(modelId, { contextWindow: entry.contextWindow, maxTokens: entry.maxTokens });
     }
     const base = baseRegistration.get(modelId)!;
-    const nextContext = result.contextLength > 0 ? result.contextLength : base.contextWindow;
-    const nextMaxTokens = result.maxCompletionTokens ?? base.maxTokens;
-    if (entry.contextWindow !== nextContext || entry.maxTokens !== nextMaxTokens) {
-      entry.contextWindow = nextContext;
-      entry.maxTokens = nextMaxTokens;
+    // Advertised endpoint limits are upper bounds to trust only downward:
+    // providers list completion limits their upstreams do not honor, and a
+    // raised cap makes pi's request budgeting send max_tokens the serving
+    // provider rejects. The registered base is the verified ceiling.
+    const next = clampedSelectionLimits(base, result);
+    if (entry.contextWindow !== next.contextWindow || entry.maxTokens !== next.maxTokens) {
+      entry.contextWindow = next.contextWindow;
+      entry.maxTokens = next.maxTokens;
       // Re-registration merges defined values over the previous registration
       // and preserves undefined ones (api/auth/refreshModels all survive).
       pi.registerProvider(PROVIDER_NAME, { models } as any);
