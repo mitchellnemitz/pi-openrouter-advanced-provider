@@ -215,6 +215,12 @@ preserved.
 ## Install
 
 ```
+pi install npm:pi-openrouter-advanced-provider
+```
+
+Or from git:
+
+```
 pi install git:github.com/mitchellnemitz/pi-openrouter-advanced-provider
 ```
 

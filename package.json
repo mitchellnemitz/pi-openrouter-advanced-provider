@@ -1,6 +1,18 @@
 {
   "name": "pi-openrouter-advanced-provider",
   "version": "1.0.0",
+  "author": "Mitchell Nemitz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mitchellnemitz/pi-openrouter-advanced-provider.git"
+  },
+  "homepage": "https://github.com/mitchellnemitz/pi-openrouter-advanced-provider#readme",
+  "bugs": {
+    "url": "https://github.com/mitchellnemitz/pi-openrouter-advanced-provider/issues"
+  },
+  "files": [
+    "pi"
+  ],
   "description": "OpenRouter provider extension for pi: account-scoped live catalog, per-model provider routing config, just-in-time provider selection, and real context windows.",
   "keywords": [
     "pi-package",
