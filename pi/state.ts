@@ -7,7 +7,9 @@ import type {
 import { toProviderModel, applyModelConfigOverrides, isReasoningModel } from "./models.js";
 import { fetchCatalogModels, fetchModelEndpoints, getCachedModels } from "./api.js";
 import { isVariantModelId } from "./config.js";
+import { beginDiscoveryAttempt as beginAttempt, type DiscoveryAttempt } from "./discovery.js";
 import type { OpenRouterModel } from "./types.js";
+import { clearEndpointLimits, setEndpointLimits } from "./selection-limits-state.js";
 
 // ---------------------------------------------------------------------------
 // Snapshot
@@ -50,6 +52,52 @@ export function commitSnapshot(generation: number, models: ProviderModelConfig[]
     timestamp: Date.now(),
   };
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery attempts
+//
+// The attempt ledger lives in pi/discovery.ts: it is the unit under test, so
+// it must not drag the host-facing imports (pi/models.ts reaches
+// @earendil-works/pi-ai) into a plain-Node test run. The attempt id shares
+// the snapshot generation counter below, so "a newer attempt started" and
+// "this snapshot is stale" can never disagree about which is newer.
+// ---------------------------------------------------------------------------
+
+export {
+  awaitNewerDiscoveryRows,
+  completeDiscoveryAttempt,
+  DiscoveryFailedError,
+  getDiscoveryOutcomesSince,
+  getNewerDiscoveryAttempt,
+  keyFingerprint,
+  publishDiscoveryRows,
+  recordDiscoveryOutcome,
+  resetDiscoveryLedger,
+  summarizeDiscovery,
+} from "./discovery.js";
+export type {
+  DiscoveryAttempt,
+  DiscoveryOutcome,
+  DiscoveryReport,
+  DiscoveryStatus,
+} from "./discovery.js";
+
+/**
+ * Start a discovery attempt whose id is the NEXT snapshot generation.
+ *
+ * The attempt id and the snapshot generation are one ordering: an attempt is
+ * stale exactly when a newer attempt has started, and the committed catalog
+ * belongs to the newest attempt. Sharing the counter keeps those two
+ * statements from ever disagreeing.
+ */
+export function beginDiscoveryAttempt(keyFingerprintValue: string): DiscoveryAttempt {
+  return beginAttempt(keyFingerprintValue, nextGeneration());
+}
+
+/** Number of attempts started so far; use it to mark the start of a refresh. */
+export function getDiscoveryAttemptCount(): number {
+  return getGeneration();
 }
 
 // ---------------------------------------------------------------------------
@@ -139,10 +187,12 @@ export function getStaleSelection(modelId: string): { result: SelectionResult; t
 
 export function setSelection(modelId: string, result: SelectionResult): void {
   selections.set(modelId, { result, timestamp: Date.now() });
+  setEndpointLimits(modelId, result);
 }
 
 export function clearSelections(): void {
   selections.clear();
+  clearEndpointLimits();
 }
 
 export function getCachedModelList(): OpenRouterModel[] | null {

@@ -18,8 +18,11 @@ import {
   defaultDelegate,
   buildStandaloneProviderConfig,
   streamOpenRouterWithRecovery,
+  OPENROUTER_RECOVERY_API,
   type StreamSimpleDelegate,
 } from "../pi/stream.ts";
+import { clearEndpointLimits, setEndpointLimits } from "../pi/selection-limits-state.ts";
+import { setRuntimeOverride } from "../pi/platform.ts";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -381,6 +384,349 @@ describe("streamOpenRouterWithRecovery", () => {
     assert.equal(finalResult.stopReason, "stop");
   });
 
+  it("rechecks context after the final payload hook changes the selected endpoint", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = {
+      messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(300) }] }],
+    };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 512, maxCompletionTokens: 128 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      const pending = options?.onPayload?.({ model: model.id, max_tokens: 128 }, model)
+        .then(() => {
+          requestSent = true;
+        })
+        .catch((error: unknown) => {
+          guardError = error;
+        });
+      void pending?.then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(
+        model,
+        context,
+        {
+          onPayload: async (payload) => {
+            setEndpointLimits(model.id, { contextLength: 300, maxCompletionTokens: 128 });
+            return payload;
+          },
+        },
+        delegate,
+      );
+      for await (const _event of stream) {
+        // The callback guard is the tested boundary; no request should be sent.
+      }
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint context limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects final payload messages that exceed the endpoint context", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 512, maxCompletionTokens: 128 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 128 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({
+          ...(payload as Record<string, unknown>),
+          messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(4_000) }] }],
+        }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint context limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("accepts a request whose requested maxTokens is smaller than the endpoint's completion ceiling", async () => {
+    const model = fakeModel();
+    // ~40k input tokens: this fits the endpoint context when the request
+    // reserves its own small output budget, but not when the guard reserves
+    // the endpoint's advertised completion ceiling.
+    const context: TranscriptContext = {
+      messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(140_000) }] }],
+    };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 65_536, maxCompletionTokens: 32_768 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 4_096 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, { maxTokens: 4_096 }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(guardError, undefined);
+      assert.equal(requestSent, true);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("still reserves the endpoint completion ceiling when the request carries no explicit budget", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = {
+      messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(140_000) }] }],
+    };
+    setRuntimeOverride("pi");
+    // No explicit budget in the request: the guard falls back to the model's
+    // registered maximum, clamped by the endpoint's completion ceiling, and
+    // the request no longer fits the endpoint context window.
+    setEndpointLimits(model.id, { contextLength: 65_536, maxCompletionTokens: 32_768 });
+    let requestSent = false;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id }, model)
+        .then(() => { requestSent = true; })
+        .catch(() => {})
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {}, delegate);
+      const events: AssistantMessageEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+      assert.equal(requestSent, false);
+      const errorEvent = events.find(
+        (event): event is Extract<AssistantMessageEvent, { type: "error" }> => event.type === "error",
+      );
+      assert.ok(errorEvent, "expected a pre-dispatch context-limit error");
+      assert.match(errorEvent.error.errorMessage, /selected OpenRouter endpoint context limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects final payload output budgets above the endpoint ceiling", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 4_096, maxCompletionTokens: 512 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 512 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({ ...(payload as Record<string, unknown>), max_tokens: 8_000 }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint completion limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+
+  it("accepts an ordinary wire-shaped final payload that fits the endpoint", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 4_096, maxCompletionTokens: 512 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 512 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({
+          ...(payload as Record<string, unknown>),
+          // The serialized OpenAI wire shape: plain role strings, string or
+          // part-array content, tool_calls, tool results.
+          messages: [
+            { role: "system", content: "You are a helpful assistant." },
+            { role: "user", content: "What is 2+2?" },
+            { role: "assistant", content: [{ type: "text", text: "Let me compute." }] },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_1", type: "function", function: { name: "calc", arguments: '{"expr":"2+2"}' } }],
+            },
+            { role: "tool", tool_call_id: "call_1", content: "4" },
+            { role: "user", content: [{ type: "text", text: "Thanks." }] },
+          ],
+          tools: [{ type: "function", function: { name: "calc", parameters: { type: "object" } } }],
+        }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(guardError, undefined);
+      assert.equal(requestSent, true);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects a wire-shaped final payload that exceeds the endpoint context", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 512, maxCompletionTokens: 128 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 128 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({
+          ...(payload as Record<string, unknown>),
+          messages: [{ role: "user", content: "x".repeat(4_000) }],
+        }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint context limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects a final payload whose max_completion_tokens exceeds the endpoint ceiling", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 4_096, maxCompletionTokens: 512 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_completion_tokens: 512 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({ ...(payload as Record<string, unknown>), max_completion_tokens: 8_000 }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint completion limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects a final payload whose max_tokens exceeds the ceiling even when max_completion_tokens is under it", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 4_096, maxCompletionTokens: 512 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 512 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({
+          ...(payload as Record<string, unknown>),
+          max_tokens: 8_000,
+          max_completion_tokens: 512,
+        }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /selected OpenRouter endpoint completion limit/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("rejects a final payload carrying a non-numeric output budget", async () => {
+    const model = fakeModel();
+    const context: TranscriptContext = { messages: [] };
+    setRuntimeOverride("pi");
+    setEndpointLimits(model.id, { contextLength: 4_096, maxCompletionTokens: 512 });
+    let requestSent = false;
+    let guardError: unknown;
+    const delegate: StreamSimpleDelegate = (_model, _context, options) => {
+      const stream = createAssistantMessageEventStream();
+      void options?.onPayload?.({ model: model.id, max_tokens: 512 }, model)
+        .then(() => { requestSent = true; })
+        .catch((error: unknown) => { guardError = error; })
+        .then(() => stream.end());
+      return stream;
+    };
+    try {
+      const stream = streamOpenRouterWithRecovery(model, context, {
+        onPayload: async (payload) => ({ ...(payload as Record<string, unknown>), max_completion_tokens: "many" }),
+      }, delegate);
+      for await (const _event of stream) {}
+      assert.equal(requestSent, false);
+      assert.ok(guardError instanceof Error);
+      assert.match((guardError as Error).message, /non-numeric "max_completion_tokens" output budget/);
+    } finally {
+      clearEndpointLimits();
+      setRuntimeOverride(undefined);
+    }
+  });
+
   it("surfaces error when retry also fails", async () => {
     const model = fakeModel();
     const context: TranscriptContext = { messages: [] };
@@ -462,6 +808,7 @@ describe("streamOpenRouterWithRecovery", () => {
 
 describe("defaultDelegate", () => {
   it("rejects non-openai-completions models with an informative error", () => {
+    setRuntimeOverride("pi");
     const model = {
       ...fakeModel(),
       api: "anthropic-messages" as any,
@@ -474,6 +821,7 @@ describe("defaultDelegate", () => {
   });
 
   it("returns an AssistantMessageEventStream for completions models", () => {
+    setRuntimeOverride("pi");
     const model = fakeModel();
     const context: TranscriptContext = { messages: [] };
     const stream = defaultDelegate(model, context);
@@ -481,15 +829,97 @@ describe("defaultDelegate", () => {
     assert.equal(typeof stream.push, "function");
     assert.equal(typeof stream.end, "function");
   });
+
+  it("rejects models not carrying the omp recovery api id under omp", () => {
+    setRuntimeOverride("omp");
+    try {
+      const model = { ...fakeModel(), api: "openai-completions" as any };
+      assert.throws(
+        () => defaultDelegate(model, { messages: [] }),
+        new RegExp(`expects api "${OPENROUTER_RECOVERY_API}"`),
+      );
+    } finally {
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("hands omp recovery-api models to the host dispatcher as openai-completions", () => {
+    setRuntimeOverride("omp");
+    try {
+      const model = { ...fakeModel(), api: OPENROUTER_RECOVERY_API as any };
+      const stream = defaultDelegate(model, { messages: [] });
+      assert.ok(stream);
+      assert.equal(typeof stream.push, "function");
+      assert.equal(typeof stream.end, "function");
+    } finally {
+      setRuntimeOverride(undefined);
+    }
+  });
 });
 
 describe("buildStandaloneProviderConfig", () => {
   it("attaches api, streamSimple recovery wrapper, and X-Title header", () => {
+    setRuntimeOverride("pi");
     const dummyModels = [fakeModel()];
     const config = buildStandaloneProviderConfig(dummyModels as any);
     assert.equal(config.api, "openai-completions");
     assert.equal(config.streamSimple, streamOpenRouterWithRecovery);
     assert.equal(config.headers["X-Title"], "openrouter-advanced-provider");
     assert.deepEqual(config.models, dummyModels);
+  });
+
+  it("registers the unique recovery api id under omp with dynamic fetch and no pinned key", () => {
+    setRuntimeOverride("omp");
+    try {
+      const config = buildStandaloneProviderConfig(undefined, {
+        fetchDynamicModels: async () => [{ id: "x", api: "openrouter" }, { id: "y" }],
+      });
+      assert.equal(config.api, OPENROUTER_RECOVERY_API);
+      assert.equal(config.streamSimple, streamOpenRouterWithRecovery);
+      assert.equal(config.models, undefined);
+      assert.equal(config.apiKey, undefined);
+      assert.equal(typeof config.fetchDynamicModels, "function");
+      return config.fetchDynamicModels("k").then((rows) => {
+        assert.equal(rows.length, 2);
+        for (const row of rows) {
+          assert.equal((row as Record<string, unknown>).api, OPENROUTER_RECOVERY_API);
+        }
+        assert.equal((rows[0] as Record<string, unknown>).id, "x");
+        assert.equal((rows[1] as Record<string, unknown>).id, "y");
+      });
+    } finally {
+      setRuntimeOverride(undefined);
+    }
+  });
+
+  it("propagates fetch failures instead of masking them with stale rows", () => {
+    setRuntimeOverride("omp");
+    try {
+      // Key A: successful discovery. Key B: the fetch fails (e.g. 5xx or a
+      // rotated key the store no longer serves). The wrapped fetcher must
+      // reject — falling back to A's rows would report A's account catalog
+      // as a successful B discovery.
+      let call = 0;
+      const config = buildStandaloneProviderConfig(undefined, {
+        fetchDynamicModels: async () => {
+          call += 1;
+          if (call === 1) return [{ id: "a", api: "openrouter" }];
+          throw new Error("discovery failed for key B");
+        },
+      });
+      const fetcher = config.fetchDynamicModels!;
+      return fetcher("key-A").then((rowsA) => {
+        assert.equal(rowsA.length, 1);
+        return fetcher("key-B").then(
+          () => assert.fail("second fetch must reject"),
+          (err: unknown) => {
+            assert.ok(err instanceof Error);
+            assert.match((err as Error).message, /key B/);
+          },
+        );
+      });
+    } finally {
+      setRuntimeOverride(undefined);
+    }
   });
 });

@@ -1,0 +1,104 @@
+# CI for pi-openrouter-advanced-provider.
+#
+# Two jobs:
+#   gates            typecheck + unit tests (no container)
+#   container-matrix the pinned dual-host container harness, one leg per host
+#                    (pi 1.5.0 / omp 18.16.0 from the Dockerfile), mock
+#                    OpenRouter only — zero secrets, no live API access.
+#
+# Actions are pinned to the exact commit SHA of their current release tag:
+#   actions/checkout        v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/setup-node      v7.1.0  949feb2413d6458794dcd2491c4babbbce0c15c1
+#   actions/cache           v6.1.0  55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+#
+# Docker layer caching: scripts/container-test.mjs owns the image build
+# (`docker build`), so the workflow warms it indirectly. BUILDKIT_INLINE_CACHE
+# makes that build embed per-layer cache metadata into the tagged image; the
+# image is then saved to the GitHub Actions cache as a tarball and restored
+# (`docker load`) on later runs, where the next `docker build` reuses the
+# unchanged layers (apt + pinned host downloads are the expensive part).
+# The cache key pins the image version and Dockerfile, so a version bump
+# starts a fresh tarball instead of loading a stale tag.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: gates (typecheck + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node (typecheck)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+  container-matrix:
+    name: container tests (${{ matrix.host }})
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [pi, omp]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node (harness runner)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Resolve image version
+        id: meta
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached container image
+        id: image-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/container-test-image.tar
+          key: container-test-image-v${{ steps.meta.outputs.version }}-${{ hashFiles('Dockerfile') }}
+
+      - name: Load cached image (layer cache source)
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load --input /tmp/container-test-image.tar
+
+      - name: Container tests (${{ matrix.host }})
+        # BUILDKIT_INLINE_CACHE embeds layer cache metadata into the image the
+        # harness builds, so the saved tarball speeds up the next run's build.
+        # Flags are the harness's only supported ones: --host=<pi|omp> and
+        # --live=false (mock only; live mode is not implemented). --no-cache
+        # is deliberately not passed — the build uses the restored layers.
+        env:
+          BUILDKIT_INLINE_CACHE: "1"
+        run: npm run test:container -- --host=${{ matrix.host }} --live=false
+
+      - name: Save image for future runs
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: >-
+          docker save
+          "$(node -p "require('./package.json').name + ':container-test-' + require('./package.json').version")"
+          --output /tmp/container-test-image.tar

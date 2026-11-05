@@ -1,0 +1,28 @@
+# Build-context exclusions for the container test harness image.
+# Goal: deterministic, small builds that can never ship credentials or
+# unrelated workspace state into the image.
+
+# VCS and local workspace state
+.git
+.gitignore
+.context
+.github
+.omp
+
+# Local dependency tree: the image installs its own from package.json, so the
+# image copy cannot drift from the host's (the runner bind-mounts the host's
+# node_modules read-only for local runs when it exists).
+node_modules
+**/node_modules
+
+# Secrets and env files — never enter the image
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Docs, logs, editor noise
+*.md
+*.log
+*.swp
+.DS_Store

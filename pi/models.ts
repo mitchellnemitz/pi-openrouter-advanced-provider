@@ -1,5 +1,6 @@
 import { getModels } from "@earendil-works/pi-ai";
 import {
+  OPENROUTER_BASE_URL,
   type OpenRouterModel,
   type OpenRouterEndpoint,
   type OpenRouterArchitecture,
@@ -241,6 +242,7 @@ export function toProviderModel(m: OpenRouterModel): ProviderModelConfig {
   const input: InputType[] = supportsImages(m.architecture) ? ["text", "image"] : ["text"];
   return withBuiltinServingMetadata({
     id: m.id,
+    ...(process.env.OPENROUTER_BASE_URL ? { baseUrl: OPENROUTER_BASE_URL } : {}),
     name: m.name || m.id,
     reasoning: isReasoningModel(m),
     input,

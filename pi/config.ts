@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentRoot } from "./platform.js";
 import type {
   LoadedRequestConfig,
   ModelRequestConfig,
@@ -215,7 +215,7 @@ function defaultConfigPath(): string {
 }
 
 function userConfigPath(): string {
-  return path.join(os.homedir(), ".pi", "agent", "openrouter-advanced-provider.json");
+  return path.join(agentRoot(), "openrouter-advanced-provider.json");
 }
 
 function readJsonFile(

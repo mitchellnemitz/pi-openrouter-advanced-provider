@@ -1,9 +1,10 @@
 # pi-openrouter-advanced-provider
 
 An [OpenRouter](https://openrouter.ai) provider extension for the
-[pi coding agent](https://github.com/earendil-works/pi): account-scoped live
-model catalog, per-model provider routing config, just-in-time provider
-selection, and real context windows.
+[pi coding agent](https://github.com/earendil-works/pi) and its
+[omp](https://omp.sh) fork: account-scoped live model catalog, per-model
+provider routing config, just-in-time provider selection, and real context
+windows. One codebase, both hosts.
 
 ## What it does
 
@@ -14,9 +15,22 @@ selection, and real context windows.
   agentic-usable capability set (`tools` + `reasoning`); catalog ids with the
   `:batch` call-method suffix are not registered, while `:free` — a price
   indicator, not a tier — remains selectable.
-- **Real context windows.** A model's registered context window comes from
-  the serving provider's endpoint data, not the catalog maximum, so pi
-  budgets and compacts against what the route actually offers.
+- **Real context windows.** The model's registered context window comes from
+  the serving endpoint's selected context limit, not the catalog maximum.
+  Under both pi and omp, JIT prewarming lowers the model's `contextWindow`
+  and `maxTokens` before dispatch; omp refreshes its dynamic rows using the
+  host-resolved credential without pinning a key. Requests also cap the
+  output budget to the lower of the selected endpoint and registered model
+  ceilings in the field selected by the transport. Before dispatch, a pi-ai
+  token estimate checks the transcript and separate system prompt; the final
+  payload hook checks outgoing messages and tool schemas with protocol
+  headroom after any selection refresh. The final payload is measured in its
+  OpenAI wire shape (role strings, string-or-part content, `tool_calls`),
+  and the output budget is read from both `max_tokens` and
+  `max_completion_tokens`, so either field is enforced against the selected
+  ceiling. Requests are rejected if their output budget exceeds
+  the selected ceiling or input plus output exceeds the endpoint context.
+  Estimates can conservatively reject prompts that would otherwise fit.
 - **Just-in-time provider selection.** See below.
 - **Router cost accounting.** OpenRouter reports `"-1"` pricing for
   `openrouter/auto` and `openrouter/auto-beta` because their price varies
@@ -24,7 +38,8 @@ selection, and real context windows.
   router response stream and puts it on the completed assistant message,
   so pi's session total uses the actual charge instead of zero. If the
   stream does not report a cost, it leaves the message unchanged rather
-  than guessing from another model's list price.
+  than guessing from another model's list price. (omp already applies the
+  billed cost natively, so this capture path runs only under pi.)
 - **Clean info channel.** Extension info messages (`/openrouter-status`,
   `/openrouter-balance`) are kept out of the LLM context, so account and
   status text never pollutes prompts.
@@ -40,12 +55,14 @@ selection, and real context windows.
 
 One of:
 
-- `OPENROUTER_API_KEY` set in the environment launching pi, or
-- an OpenRouter key stored via `/login` in `~/.pi/agent/auth.json`.
+- `OPENROUTER_API_KEY` set in the environment launching the agent, or
+- an OpenRouter key stored via `/login` in the host's auth store.
 
 The extension resolves the key at load time (env first, then the auth
-store). Without a key no registration happens — falling back to the public
-catalog would silently swap account-scoped data for the generic list.
+store). Under pi that is `~/.pi/agent/auth.json`; under omp it also peeks
+read-only at omp's credential store (`~/.omp/agent/agent.db`). Without a key
+no registration happens — falling back to the public catalog would silently
+swap account-scoped data for the generic list.
 
 ## Just-in-time provider selection
 
@@ -64,8 +81,8 @@ model is selected:
   `provider: {order: [pick], ignore: [...], allow_fallbacks: true}` — the
   single pick first, and if it becomes unavailable, OpenRouter's own
   fallback balancing takes over (minus ignored providers).
-- The picked provider's `context_length` becomes the model's registered
-  context window.
+  The active model's `contextWindow` and `maxTokens` are lowered to the
+  selected endpoint's advertised limits.
 - If a compliant alternative is serving ≥1.75× the winner's p50 throughput,
   you get an advisory notification at switch time. Advisory only — the pick
   stands.
@@ -103,8 +120,9 @@ One file name, two locations — the location differentiates, nothing else:
 
 - `pi/openrouter-advanced-provider.json` — shipped defaults for the selection
   tuning below.
-- `~/.pi/agent/openrouter-advanced-provider.json` — user overrides, merged
-  per-field on top. Reload via `/openrouter-sync` after editing.
+- `~/.pi/agent/openrouter-advanced-provider.json` (pi) or
+  `~/.omp/agent/openrouter-advanced-provider.json` (omp) — user overrides,
+  merged per-field on top. Reload via `/openrouter-sync` after editing.
 
 ### Selection tuning
 
@@ -215,7 +233,8 @@ preserved.
 ## Install
 
 ```
-pi install npm:pi-openrouter-advanced-provider
+pi install npm:pi-openrouter-advanced-provider     # pi
+omp install npm:pi-openrouter-advanced-provider    # omp
 ```
 
 Or from git:
@@ -224,7 +243,7 @@ Or from git:
 pi install git:github.com/mitchellnemitz/pi-openrouter-advanced-provider
 ```
 
-Then reload pi.
+Then reload the agent.
 
 ## Commands
 
@@ -236,11 +255,47 @@ Then reload pi.
 ## Development
 
 ```
-npm install
+npm ci
 npm run typecheck
 npm test
 ```
 
+A synchronized `package-lock.json` is tracked, so `npm ci` installs the
+exact pinned dependency tree (and is what CI runs, with npm caching).
+
+`npm test` runs the unit tests on plain Node — no Bun needed. Node ≥ 22.18
+strips TypeScript natively (`scripts/run-tests.mjs` enforces this);
+`scripts/ts-resolve.mjs` remaps the sources' TypeScript-style `.js`
+specifiers to `.ts` the same way the extension loader resolves them at
+runtime. The full dual-host suite is in the container harness below.
+
 The typecheck maps `@earendil-works/pi-ai` the same way pi's extension
 loader resolves it at runtime, so the types you compile against are the
 types that serve.
+
+## Container test harness
+
+`npm run test:container` exercises the extension end-to-end inside a pinned
+dual-host container — no OpenRouter account or key required. The image
+(`oven/bun:1.4.3-debian`) installs pi 1.5.0 and omp 18.16.0 from their
+official releases, checksum-verified at build time. The mock OpenRouter API
+runs **inside** the container and the container runs with `--network=none`,
+so no live API call can happen and your real credentials are never mounted
+or copied in — the harness seeds fixture credential stores (fixture key
+`sk-or-test-container`) into an isolated tmpfs HOME.
+
+```
+npm run test:container                    # both hosts (pi + omp)
+npm run test:container -- --host=pi       # single host (or --host=omp)
+npm run test:container -- --no-cache      # rebuild the image without layer cache
+```
+
+`--live=false` is the only permitted `--live` setting (the harness is
+mock-only); any other value exits with an error. The runner asserts against
+the mock's request log (fixture key used, public catalog never fetched while
+keyed), registry/session artifacts, and process exits; it exits nonzero on
+any failed assertion.
+
+In CI, the same command runs in the `container-matrix` workflow job (one leg
+per host) with the Docker build cache warmed from a saved image — see
+`.github/workflows/ci.yml`. Requires Docker locally.

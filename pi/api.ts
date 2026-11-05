@@ -198,7 +198,7 @@ export function getCachedModels(): OpenRouterModel[] | null {
 // Shapes verified against live responses; re-verify there when they misbehave.
 // ---------------------------------------------------------------------------
 
-const FRONTEND_BASE_URL = "https://openrouter.ai/api/frontend/v1";
+const FRONTEND_BASE_URL = new URL("../frontend/v1", `${OPENROUTER_BASE_URL}/`).href;
 const PERMASLUG_TTL_MS = 24 * 60 * 60 * 1000;
 
 let permaslugCache: { map: Map<string, string>; timestamp: number } | null = null;

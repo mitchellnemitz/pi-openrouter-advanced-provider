@@ -1,4 +1,7 @@
 import type { MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import { OPENROUTER_BASE_URL } from "./types.js";
+
+const OPENROUTER_ORIGIN = new URL(OPENROUTER_BASE_URL).origin;
 
 type Assistant = Extract<MessageEndEvent["message"], { role: "assistant" }>;
 type Captures = Map<string, Promise<number | undefined>>;
@@ -14,7 +17,7 @@ function isRouterRequest(input: string | URL, init?: RequestInit): boolean {
   try {
     const raw = typeof input === "string" ? input : input.href;
     const url = new URL(raw);
-    return url.hostname === "openrouter.ai" && url.pathname.endsWith("/chat/completions")
+    return url.origin === OPENROUTER_ORIGIN && url.pathname.endsWith("/chat/completions")
       && isRouter(JSON.parse(init.body).model);
   } catch {
     return false;
