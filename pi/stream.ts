@@ -84,11 +84,43 @@ function syncThrowErrorEvent(
 
 export const APP_TITLE = "openrouter-advanced-provider";
 
-export function buildStandaloneProviderConfig(models: unknown[] | undefined) {
+/**
+ * Build the standalone provider registration. `apiKey` is only set when a
+ * key was actually resolved: stock pi merges the registration with its builtin
+ * OpenRouter entry (undefined preserves the builtin's credential handling),
+ * while omp's validator requires baseUrl and apiKey whenever models are
+ * defined - so under omp the caller always passes both or skips registration.
+ * `includeApiStream` is false under omp, which reserves built-in API names
+ * and rejects registering a custom streamSimple for "openai-completions";
+ * there the models' own api field dispatches to omp's built-in transport
+ * (the thought-signature recovery wrapper is stock-pi-only).
+ */
+export function buildStandaloneProviderConfig(
+  models: unknown[] | undefined,
+  apiKey?: string,
+  includeApiStream = true,
+) {
   return {
     models: models ?? [],
+    // Stock pi merges a registration that omits baseUrl with its builtin
+    // OpenRouter entry; omp instead requires baseUrl whenever models are
+    // defined, and its validator rejects the registration without it.
+    baseUrl: "https://openrouter.ai/api/v1",
+    ...(apiKey ? { apiKey } : {}),
+    // omp also validates that every model carries an api, so the provider-
+    // level api stays; under omp only the streamSimple override is dropped
+    // (omp reserves built-in API names for custom stream functions, so the
+    // thought-signature recovery wrapper is stock-pi-only).
     api: "openai-completions",
-    streamSimple: streamOpenRouterWithRecovery,
+    // omp only attaches the Authorization header when authHeader is set;
+    // stock pi's builtin OpenRouter registration already does this, and its
+    // merge keeps the explicit true (same value) harmless there.
+    authHeader: true,
+    ...(includeApiStream
+      ? {
+          streamSimple: streamOpenRouterWithRecovery,
+        }
+      : {}),
     headers: {
       // No HTTP-Referer: this extension sends no public site URL.
       // X-Title identifies the app in OpenRouter's stats.

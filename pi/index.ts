@@ -69,6 +69,12 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // registerTranscriptPresenter method exists only on omp's ExtensionAPI.
   const isOmp = typeof (pi as any).registerTranscriptPresenter === "function";
 
+  // Most recently resolved OpenRouter key, used for registrations under omp
+  // (whose validator demands an apiKey alongside models on every
+  // registerProvider call). Stock pi registrations never set apiKey: its merge
+  // keeps the builtin provider's credential handling.
+  let ompApiKey: string | undefined;
+
   // Pi prices router slugs from their zero-cost catalog entry rather than the
   // model OpenRouter served. Capture its billed SSE cost once per response and
   // replace the finalized message so session totals see the real amount.
@@ -210,9 +216,10 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     if (entry.contextWindow !== next.contextWindow || entry.maxTokens !== next.maxTokens) {
       entry.contextWindow = next.contextWindow;
       entry.maxTokens = next.maxTokens;
-      // Re-registration merges defined values over the previous registration
-      // and preserves undefined ones (api/auth/refreshModels all survive).
-      pi.registerProvider(PROVIDER_NAME, { models } as any);
+      // Under omp the validator requires apiKey with models on every
+      // re-registration; pass the key this prewarm resolved (it is the
+      // freshest credential) and skip when none.
+      registerModels(models, isOmp ? apiKey : ompApiKey);
     }
 
     if (result.advisory) {
@@ -337,8 +344,26 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
    * mode. Attaching api and streamSimple routes completions requests through
    * the recovery wrapper while leaving non-completions APIs to base dispatch.
    */
+  /**
+   * Register (or re-register) the provider's models. Stock pi merges
+   * re-registrations key by key — defined values win, undefined values
+   * preserve what is beneath — so the base api/streamSimple/headers all
+   * survive a models-only re-registration. omp's validator instead requires
+   * baseUrl and apiKey alongside models on every registration, and a
+   * violation aborts its startup — so under omp a registration without a
+   * resolved key is skipped (omp's builtin openrouter provider keeps
+   * serving), never thrown.
+   */
+  function registerModels(models: ProviderRegistration["models"], apiKey?: string): void {
+    if (isOmp && !apiKey) return;
+    pi.registerProvider(
+      PROVIDER_NAME,
+      buildStandaloneProviderConfig(models, isOmp ? apiKey : undefined, !isOmp) as any,
+    );
+  }
+
   function registerStandalone(models: ProviderRegistration["models"]) {
-    pi.registerProvider(PROVIDER_NAME, buildStandaloneProviderConfig(models) as any);
+    registerModels(models, ompApiKey);
   }
 
   /**
@@ -351,6 +376,10 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
    */
   function bootstrapApiKey(): string | undefined {
     if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+    // Under omp, skip stock pi's auth file: each host keeps its own
+    // credential store (~/.omp), and borrowing a key across hosts would
+    // surprise. session_start's registry-based sync covers omp's store.
+    if (isOmp) return undefined;
     try {
       const authPath = path.join(os.homedir(), ".pi", "agent", "auth.json");
       if (!fs.existsSync(authPath)) return undefined;
@@ -368,6 +397,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
     const generation = nextGeneration();
     const apiKey = bootstrapApiKey();
     if (!apiKey) return; // session_start syncs with the registry key
+    ompApiKey ??= apiKey;
 
     try {
       refreshRequestConfig();
@@ -396,6 +426,7 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
     try {
       const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_NAME);
+      if (apiKey) ompApiKey = apiKey;
       if (!silent) ctx.ui.notify("Fetching OpenRouter models...", "info");
 
       refreshRequestConfig();
