@@ -1,4 +1,4 @@
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   type OpenRouterModel,
   type OpenRouterEndpoint,
@@ -200,7 +200,7 @@ export function applyModelConfigOverrides(
  * catalog entries merge over that metadata so converted models keep
  * everything pi knows about serving them.
  */
-const BUILTIN_OPENROUTER_MODELS = new Map(getModels("openrouter").map((model) => [model.id, model]));
+const BUILTIN_OPENROUTER_MODELS = new Map(getBuiltinModels("openrouter").map((model) => [model.id, model]));
 
 function withBuiltinServingMetadata(model: ProviderModelConfig): ProviderModelConfig {
   const builtin = BUILTIN_OPENROUTER_MODELS.get(model.id);
