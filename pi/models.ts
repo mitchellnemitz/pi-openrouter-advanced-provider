@@ -1,4 +1,3 @@
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   type OpenRouterModel,
   type OpenRouterEndpoint,
@@ -199,18 +198,51 @@ export function applyModelConfigOverrides(
  * baseUrl, thinking-level maps, compat quirks, provider headers). Our
  * catalog entries merge over that metadata so converted models keep
  * everything pi knows about serving them.
+ *
+ * The builtin list is resolved lazily via a dynamic import rather than a
+ * static one: the only specifiers that carry it at runtime are
+ * `@earendil-works/pi-ai/compat` on stock pi (whose compat entrypoint still
+ * exports getModels) and, on oh-my-pi, the same specifier remapped to the
+ * pi-ai root whose legacy shim re-exports it — but omp's published type
+ * declarations omit that shim export, so a static import cannot typecheck
+ * against both hosts. Resolving at first sync keeps one code path that
+ * works everywhere; an unresolvable module simply leaves the merge off.
  */
-const BUILTIN_OPENROUTER_MODELS = new Map(getBuiltinModels("openrouter").map((model) => [model.id, model]));
+interface BuiltinModelMeta {
+  id: string;
+  api?: ProviderModelConfig["api"];
+  baseUrl?: ProviderModelConfig["baseUrl"];
+  reasoning?: boolean;
+  thinkingLevelMap?: ProviderModelConfig["thinkingLevelMap"];
+  headers?: ProviderModelConfig["headers"];
+  compat?: ProviderModelConfig["compat"];
+}
+
+let builtinModelMeta: Map<string, BuiltinModelMeta> | null = null;
+
+/** Load pi's builtin OpenRouter serving metadata (once). */
+export async function ensureBuiltinModelMeta(): Promise<void> {
+  if (builtinModelMeta) return;
+  let models: BuiltinModelMeta[] = [];
+  try {
+    const mod: any = await import("@earendil-works/pi-ai/compat");
+    const get = mod.getModels ?? mod.getBundledModels;
+    if (typeof get === "function") models = get("openrouter") ?? [];
+  } catch {
+    // metadata merge is optional; run without it
+  }
+  builtinModelMeta = new Map(models.map((model) => [model.id, model]));
+}
 
 function withBuiltinServingMetadata(model: ProviderModelConfig): ProviderModelConfig {
-  const builtin = BUILTIN_OPENROUTER_MODELS.get(model.id);
+  const builtin = builtinModelMeta?.get(model.id);
   if (!builtin) return model;
 
   const merged: ProviderModelConfig = {
     ...model,
     api: model.api ?? builtin.api,
     baseUrl: model.baseUrl ?? builtin.baseUrl,
-    reasoning: model.reasoning || builtin.reasoning,
+    reasoning: model.reasoning || builtin.reasoning || false,
   };
 
   if (builtin.thinkingLevelMap || model.thinkingLevelMap) {

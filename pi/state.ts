@@ -4,7 +4,7 @@ import type {
   SelectionResult,
   SyncSnapshot,
 } from "./types.js";
-import { toProviderModel, applyModelConfigOverrides, isReasoningModel } from "./models.js";
+import { toProviderModel, applyModelConfigOverrides, ensureBuiltinModelMeta, isReasoningModel } from "./models.js";
 import { fetchCatalogModels, fetchModelEndpoints, getCachedModels } from "./api.js";
 import { isVariantModelId } from "./config.js";
 import type { OpenRouterModel } from "./types.js";
@@ -84,6 +84,7 @@ export async function buildPlainSync(
   config?: RequestConfig,
 ): Promise<SyncPlainResult> {
   const rawModels = await fetchCatalogModels(apiKey, force);
+  await ensureBuiltinModelMeta();
   let models = rawModels
     .filter((m) => !isVariantModelId(m.id) && isAgenticUsableModel(m))
     .map(toProviderModel);

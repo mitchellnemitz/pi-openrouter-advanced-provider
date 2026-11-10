@@ -10,7 +10,7 @@
 
 import {
   createAssistantMessageEventStream,
-  openAICompletionsApi,
+  streamSimple,
   type AssistantMessage,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
@@ -18,7 +18,6 @@ import {
   type Message,
   type Model,
   type SimpleStreamOptions,
-  type TranscriptContext,
 } from "@earendil-works/pi-ai/compat";
 import {
   driveRecoveryLoop,
@@ -28,21 +27,31 @@ import {
   type RecoveryState,
 } from "./recovery.ts";
 
+// Both hosts pass a transcript-shaped context to stream functions, but only
+// stock pi names the type TranscriptContext (omp's pi-ai uses Context), and
+// the delegate treats it as opaque. Derive it from the shared streamSimple
+// import so one signature typechecks against either host's declarations.
+type StreamContext = Parameters<typeof streamSimple>[1];
+
 export type StreamSimpleDelegate = (
   model: Model<Api>,
-  context: TranscriptContext,
+  context: StreamContext,
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
 export function defaultDelegate(
   model: Model<Api>,
-  context: TranscriptContext,
+  context: StreamContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   if (model.api !== "openai-completions") {
     throw new Error(`OpenRouter recovery wrapper expects api "openai-completions", got "${model.api}"`);
   }
-  return openAICompletionsApi().streamSimple(model as Model<"openai-completions">, context, options);
+  // Generic api-dispatched streamSimple, not openAICompletionsApi(): the
+  // latter does not exist under oh-my-pi's pi-ai, while both hosts export
+  // the dispatcher from /compat (stock) or the package root (omp, remapped).
+  // For openai-completions models it resolves to the same implementation.
+  return streamSimple(model as Model<"openai-completions">, context, options);
 }
 
 function syncThrowErrorEvent(
@@ -90,7 +99,7 @@ export function buildStandaloneProviderConfig(models: unknown[] | undefined) {
 
 export function streamOpenRouterWithRecovery(
   model: Model<Api>,
-  context: TranscriptContext,
+  context: StreamContext,
   options?: SimpleStreamOptions,
   delegate: StreamSimpleDelegate = defaultDelegate,
 ): AssistantMessageEventStream {
@@ -113,7 +122,7 @@ export function streamOpenRouterWithRecovery(
 
       const outcome = await driveRecoveryLoop(
         (spec) =>
-          delegate(model, { ...context, messages: spec.messages } as TranscriptContext, spec.options),
+          delegate(model, { ...context, messages: spec.messages } as StreamContext, spec.options),
         applyRetry,
         initial,
         state,

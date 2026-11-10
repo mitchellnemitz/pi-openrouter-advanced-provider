@@ -62,27 +62,43 @@ function emitMessage(pi: ExtensionAPI, text: string) {
 }
 
 export default async function openrouterModelsExtension(pi: ExtensionAPI) {
+  // Host detection: oh-my-pi (omp), pi's hard fork, keeps the registerProvider
+  // and event surface this extension uses, but its message_end is
+  // notification-only (no { message } replacement) and its only rewrite hook
+  // covers text content, so usage-cost correction has no effect there. The
+  // registerTranscriptPresenter method exists only on omp's ExtensionAPI.
+  const isOmp = typeof (pi as any).registerTranscriptPresenter === "function";
+
   // Pi prices router slugs from their zero-cost catalog entry rather than the
   // model OpenRouter served. Capture its billed SSE cost once per response and
   // replace the finalized message so session totals see the real amount.
-  const key = Symbol.for("pi-openrouter-advanced-provider:router-cost");
-  const globals = globalThis as any;
-  const costState: {
-    wrapped: boolean;
-    captures: Map<string, Promise<number | undefined>>;
-  } = globals[key] ??= { wrapped: false, captures: new Map() };
-  if (!costState.wrapped) {
-    // Reload intentionally keeps this first wrapper: it closes over the
-    // original module's parsing code, so wrapper changes need a process
-    // restart. Re-wrapping on every load would stack wrappers instead.
-    globalThis.fetch = wrapRouterCostFetch(globalThis.fetch, costState.captures);
-    costState.wrapped = true;
+  // Skipped under omp: the rewritten message would be discarded, so the
+  // global fetch wrapper would run for nothing (and stay installed).
+  if (!isOmp) {
+    const key = Symbol.for("pi-openrouter-advanced-provider:router-cost");
+    const globals = globalThis as any;
+    const costState: {
+      wrapped: boolean;
+      captures: Map<string, Promise<number | undefined>>;
+    } = globals[key] ??= { wrapped: false, captures: new Map() };
+    if (!costState.wrapped) {
+      // Reload intentionally keeps this first wrapper: it closes over the
+      // original module's parsing code, so wrapper changes need a process
+      // restart. Re-wrapping on every load would stack wrappers instead.
+      globalThis.fetch = wrapRouterCostFetch(globalThis.fetch, costState.captures);
+      costState.wrapped = true;
+    }
+    // Registered through a widened type: stock pi's message_end accepts a
+    // { message } return, but omp declares the event notification-only, so
+    // the returning handler does not fit omp's overload even though this
+    // branch never runs there. The gate above is the real host check.
+    const onMessageEnd = pi.on as (event: "message_end", handler: (event: any) => Promise<any>) => void;
+    onMessageEnd("message_end", async (event) => {
+      if (event.message.role !== "assistant") return;
+      const message = await restoreRouterCost(event.message, costState.captures);
+      if (message) return { message };
+    });
   }
-  pi.on("message_end", async (event) => {
-    if (event.message.role !== "assistant") return;
-    const message = await restoreRouterCost(event.message, costState.captures);
-    if (message) return { message };
-  });
 
   // ---------- Per-model config overrides ----------
 
@@ -173,7 +189,12 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
 
     // Adjust the model's registered context window to the picked provider's,
     // so budgeting/autocompact reflect the provider that will actually serve.
-    const registered = ctx.modelRegistry?.getRegisteredProviderConfig?.(PROVIDER_NAME);
+    // omp's model registry has no getRegisteredProviderConfig; fall back to
+    // the extension's own committed snapshot, which holds the same objects
+    // registerStandalone registered.
+    const registered =
+      ctx.modelRegistry?.getRegisteredProviderConfig?.(PROVIDER_NAME) ??
+      { models: getSnapshot().models };
     const models = registered?.models as any[] | undefined;
     const entry = models?.find((m) => m.id === modelId);
     if (!entry) return;
