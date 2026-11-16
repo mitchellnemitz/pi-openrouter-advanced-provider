@@ -24,11 +24,12 @@ import { buildStandaloneProviderConfig, streamOpenRouterWithRecovery } from "./s
 import { restoreRouterCost, wrapRouterCostFetch } from "./auto-cost.js";
 import {
   DEFAULT_SELECTION,
+  DEFAULT_UI,
   isVariantModelId,
   loadRequestConfig,
   mergeRequestConfig,
 } from "./config.js";
-import type { SelectionTuning } from "./types.js";
+import type { SelectionTuning, UiTuning } from "./types.js";
 import {
   COST_TIERS,
   COST_TIER_BANDS,
@@ -115,12 +116,14 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   let requestConfig: RequestConfig = {};
   let configWarnings: string[] = [];
   let selectionTuning: SelectionTuning = DEFAULT_SELECTION;
+  let uiTuning: UiTuning = DEFAULT_UI;
 
   function refreshRequestConfig(): void {
     const loaded = loadRequestConfig();
     requestConfig = loaded.config;
     configWarnings = loaded.warnings;
     selectionTuning = loaded.selection;
+    uiTuning = loaded.ui;
   }
 
   function notifyConfigWarnings(ctx: any) {
@@ -673,6 +676,14 @@ export default async function openrouterModelsExtension(pi: ExtensionAPI) {
   // ---------- Status bar ----------
 
   function updateStatusBar(ctx: any) {
+    if (!uiTuning.statusBar) {
+      try {
+        ctx.ui.setStatus("openrouter", undefined);
+      } catch {
+        // setStatus may not be available in all UI modes
+      }
+      return;
+    }
     const snapshot = getSnapshot();
     if (snapshot.models.length > 0) {
       try {

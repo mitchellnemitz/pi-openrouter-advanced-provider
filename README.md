@@ -106,6 +106,22 @@ One file name, two locations — the location differentiates, nothing else:
 - `~/.pi/agent/openrouter-advanced-provider.json` — user overrides, merged
   per-field on top. Reload via `/openrouter-sync` after editing.
 
+### UI options
+
+The `ui` section toggles the extension's footprint in pi's UI:
+
+```json
+{
+  "ui": {
+    "statusBar": false
+  }
+}
+```
+
+- `statusBar` (default `true`) controls the `OR: N models` footer status
+  line. Set it to `false` to hide the line entirely; the extension clears
+  the slot instead of publishing the count.
+
 ### Selection tuning
 
 The `selection` section tunes the just-in-time provider selection

@@ -213,3 +213,30 @@ describe("loadRequestConfig selection seam", () => {
     assert.ok(loaded.warnings.some((warning) => warning.includes("midrange")));
   });
 });
+
+describe("parseUiSection / loadRequestConfig ui seam", () => {
+  it("defaults ui.statusBar to true and honors a user override of false", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seltune-ui-"));
+    const write = (name: string, content: unknown) => {
+      const file = path.join(tmp, name);
+      fs.writeFileSync(file, JSON.stringify(content));
+      return file;
+    };
+    const shipped = write("shipped.json", {});
+    const userDefault = write("user-default.json", {});
+    assert.equal(loadRequestConfig(shipped, userDefault).ui.statusBar, true);
+    const userOff = write("user-off.json", { ui: { statusBar: false } });
+    assert.equal(loadRequestConfig(shipped, userOff).ui.statusBar, false);
+  });
+
+  it("warns and keeps the default when ui.statusBar is not a boolean", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seltune-ui2-"));
+    const file = path.join(tmp, "user.json");
+    fs.writeFileSync(file, JSON.stringify({ ui: { statusBar: "no" } }));
+    const shipped = path.join(tmp, "shipped.json");
+    fs.writeFileSync(shipped, "{}");
+    const loaded = loadRequestConfig(shipped, file);
+    assert.equal(loaded.ui.statusBar, true);
+    assert.ok(loaded.warnings.some((warning) => warning.includes("statusBar")));
+  });
+});

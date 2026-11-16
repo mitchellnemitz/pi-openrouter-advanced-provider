@@ -152,7 +152,18 @@ export interface RequestConfig {
 export interface LoadedRequestConfig {
   config: RequestConfig;
   selection: SelectionTuning;
+  ui: UiTuning;
   warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// UI chrome toggles (user config file)
+// ---------------------------------------------------------------------------
+
+/** Toggles for the extension's pi UI surface. */
+export interface UiTuning {
+  /** false: never publish the "OR: N models" footer status line. */
+  statusBar: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import type {
   RequestConfig,
   SelectionTuning,
   SelectionWeights,
+  UiTuning,
 } from "./types.js";
 
 /**
@@ -125,6 +126,11 @@ export const DEFAULT_SELECTION: SelectionTuning = {
   flagshipWeights: { throughput: 0.3, latency: 0.25, toolCall: 0.2, price: 0.25 },
 };
 
+/** Built-in UI toggles — the extension shows its footer status by default. */
+export const DEFAULT_UI: UiTuning = {
+  statusBar: true,
+};
+
 const WEIGHT_KEYS = ["throughput", "latency", "toolCall", "price"] as const;
 
 function parseWeights(
@@ -206,6 +212,26 @@ export function parseSelectionSection(raw: unknown, warnings: string[]): Selecti
     }
   }
   return tuning;
+}
+
+export function parseUiSection(raw: unknown, warnings: string[]): UiTuning {
+  if (raw === undefined) return structuredClone(DEFAULT_UI);
+  if (!isPlainObject(raw)) {
+    warnings.push(`"ui" section must be an object — default UI kept`);
+    return structuredClone(DEFAULT_UI);
+  }
+  const ui: UiTuning = structuredClone(DEFAULT_UI);
+
+  if (raw.statusBar !== undefined) {
+    if (typeof raw.statusBar === "boolean") ui.statusBar = raw.statusBar;
+    else warnings.push(`ui.statusBar must be a boolean — default kept`);
+  }
+  for (const key of Object.keys(raw)) {
+    if (key !== "statusBar") {
+      warnings.push(`ui.${key} is not a UI option — dropped`);
+    }
+  }
+  return ui;
 }
 
 function defaultConfigPath(): string {
@@ -375,6 +401,9 @@ export function loadRequestConfig(
     if (file?.selection !== undefined && !isPlainObject(file.selection)) {
       warnings.push(`${label}: "selection" section must be an object — default tuning kept`);
     }
+    if (file?.ui !== undefined && !isPlainObject(file.ui)) {
+      warnings.push(`${label}: "ui" section must be an object — default UI kept`);
+    }
   }
   const mergedSelectionRaw =
     isPlainObject(userFile?.selection) || isPlainObject(defaultFile?.selection)
@@ -384,6 +413,14 @@ export function loadRequestConfig(
         )
       : undefined;
   const selection = parseSelectionSection(mergedSelectionRaw, warnings);
+  const mergedUiRaw =
+    isPlainObject(userFile?.ui) || isPlainObject(defaultFile?.ui)
+      ? deepMerge(
+          isPlainObject(defaultFile?.ui) ? defaultFile.ui : {},
+          isPlainObject(userFile?.ui) ? userFile.ui : {},
+        )
+      : undefined;
+  const ui = parseUiSection(mergedUiRaw, warnings);
 
   const defaultModels = defaultRaw.models;
   const userModels = userRaw.models;
@@ -417,5 +454,5 @@ export function loadRequestConfig(
     defaults: validatedDefaults,
     models: Object.keys(mergedModels).length > 0 ? new Map(Object.entries(mergedModels)) : undefined,
   };
-  return { config, selection, warnings };
+  return { config, selection, ui, warnings };
 }
